@@ -10,13 +10,16 @@ export function makeNpc({ id, rng, worldSize }) {
       x: rng.int(0, worldSize.w - 1),
       y: rng.int(0, worldSize.h - 1)
     },
+
+    // Slice 4: assigned by ContractManager
+    contractId: null,
+
     needs: makeNeeds(rng),
     traits: makeTraits(rng),
     emotions: {
       fear: makeFear()
     },
     memory: {
-      // reserved for later slices (contracts, landmarks, etc.)
       lastAction: null
     }
   };

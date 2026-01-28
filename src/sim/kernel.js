@@ -11,13 +11,20 @@ import { buildObservation } from "../policy/observation.js";
 import { getPolicyPackById } from "../policy/policyPack.js";
 import { ActionKinds } from "./types.js";
 
+import { makeContractManager } from "../contracts/contractManager.js";
+
 export function runSimulation(config) {
   const rng = makeRng(config.seed);
   const clock = makeClock();
   const eventLog = makeEventLog(config.events.keepLast);
   const metrics = makeMetrics();
 
-  const world = makeWorld({ size: config.worldSize, rng, threatCount: config.threatCount });
+  const world = makeWorld({
+    size: config.worldSize,
+    rng,
+    threatCount: config.threatCount,
+    foodMultiplier: config.world?.foodMultiplier ?? 1.0
+  });
 
   const makeNpcId = makeIdFactory("npc");
   const npcs = [];
@@ -31,17 +38,20 @@ export function runSimulation(config) {
     );
   }
 
+  // Slice 4: contracts
+  const contractManager = makeContractManager({ rng, config, world, npcs });
+
   const policyPack = getPolicyPackById(config.policyPack);
 
   for (let i = 0; i < config.ticks; i++) {
-    tickOnce({ config, rng, clock, world, npcs, policyPack, eventLog, metrics });
+    tickOnce({ config, rng, clock, world, npcs, contractManager, policyPack, eventLog, metrics });
   }
 
   const report = makeRunReport({ config, metrics, eventLog, world, npcs });
   return { config, world, npcs, metrics, eventLog, report };
 }
 
-function tickOnce({ config, rng, clock, world, npcs, policyPack, eventLog, metrics }) {
+function tickOnce({ config, rng, clock, world, npcs, contractManager, policyPack, eventLog, metrics }) {
   // roam threats (very simple)
   for (const th of world.threats) {
     if (rng.chance(th.roam * 0.35)) {
@@ -50,6 +60,9 @@ function tickOnce({ config, rng, clock, world, npcs, policyPack, eventLog, metri
       th.y = clamp(th.y + step.y, 0, world.size.h - 1);
     }
   }
+
+  // update contracts (waypoint advancing, leader replacement, member cleanup)
+  contractManager.tick({ tick: clock.tick });
 
   // NPC loop
   let aliveCount = 0;
@@ -60,16 +73,17 @@ function tickOnce({ config, rng, clock, world, npcs, policyPack, eventLog, metri
   for (const npc of npcs) {
     if (!npc.alive) continue;
 
-    // 1) update needs baseline drain
+    // 1) baseline drain
     npc.needs.hunger = clamp01(npc.needs.hunger + config.needs.hungerDrain);
     npc.needs.fatigue = clamp01(npc.needs.fatigue + config.needs.fatigueDrain);
 
-    // 2) build observation (stable spec)
+    // 2) observation
     const obs = buildObservation({
       tick: clock.tick,
       npc,
       world,
-      config
+      config,
+      contractManager
     });
 
     // 3) policy selects action
@@ -79,7 +93,6 @@ function tickOnce({ config, rng, clock, world, npcs, policyPack, eventLog, metri
     applyAction({ npc, action, world, rng, config, eventLog, tick: clock.tick, metrics });
 
     // 5) consequences (starvation/exhaustion thresholds)
-    // (bounded “real-world constraints”: simple physiology-like failure)
     if (npc.needs.hunger >= 1 && rng.chance(0.02 + npc.needs.hunger * 0.03)) {
       npc.alive = false;
       eventLog.push({ tick: clock.tick, type: "NPC_DEATH", msg: `${npc.id} died (starvation)` });
@@ -136,7 +149,6 @@ function applyAction({ npc, action, world, rng, config, eventLog, tick, metrics 
     }
 
     case ActionKinds.EAT: {
-      // find food at position (or adjacent)
       const food = nearestFood(world, npc.pos, 1);
       if (food) {
         const take = Math.min(food.amount, rng.int(1, 3));
@@ -162,7 +174,6 @@ function applyAction({ npc, action, world, rng, config, eventLog, tick, metrics 
     }
 
     case ActionKinds.INVESTIGATE: {
-      // light movement toward nearest food or away from nothing; "curiosity" proxy
       const food = nearestFood(world, npc.pos, 6);
       if (food) {
         const step = stepToward(npc.pos, food, rng);
@@ -177,7 +188,6 @@ function applyAction({ npc, action, world, rng, config, eventLog, tick, metrics 
 
     case ActionKinds.IDLE:
     default:
-      // nothing
       break;
   }
 }
@@ -212,7 +222,6 @@ function nearestThreat(world, pos, radius) {
 function stepToward(pos, target, rng) {
   const dx = Math.sign(target.x - pos.x);
   const dy = Math.sign(target.y - pos.y);
-  // slight randomness to avoid perfect lines
   if (rng.chance(0.15)) return randomStep(rng);
   if (Math.abs(target.x - pos.x) > Math.abs(target.y - pos.y)) return { x: dx, y: 0 };
   return { x: 0, y: dy };

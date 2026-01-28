@@ -3,12 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Headless Node.js simulation kernel with NPC needs/traits and mechanized fear.",
+  "description": "Project Cardinal: headless Node.js simulation kernel with NPC needs/traits, mechanized fear, and contracts.",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "sim": "node src/index.js",
+    "governor": "node src/governorIndex.js",
     "test": "node --test"
   }
 }

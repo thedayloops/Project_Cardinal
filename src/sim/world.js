@@ -1,4 +1,4 @@
-export function makeWorld({ size, rng, threatCount }) {
+export function makeWorld({ size, rng, threatCount, foodMultiplier = 1.0 }) {
   const world = {
     size,
     food: [],
@@ -6,7 +6,9 @@ export function makeWorld({ size, rng, threatCount }) {
   };
 
   // Seed some food piles
-  const foodCount = Math.floor((size.w * size.h) / 18);
+  const baseFoodCount = Math.floor((size.w * size.h) / 18);
+  const foodCount = Math.max(1, Math.floor(baseFoodCount * Math.max(0.1, foodMultiplier)));
+
   for (let i = 0; i < foodCount; i++) {
     world.food.push({
       id: `food_${i + 1}`,
