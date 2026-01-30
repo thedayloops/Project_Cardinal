@@ -11,5 +11,8 @@
     "sim": "node src/index.js",
     "governor": "node src/governorIndex.js",
     "test": "node --test"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3"
   }
 }

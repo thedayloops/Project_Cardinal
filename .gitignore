@@ -1,4 +1,7 @@
 node_modules
 .DS_Store
 .env
+.env.*
 *.log
+tools/repo-agent/agent_artifacts/
+tools/repo-agent/dist/
