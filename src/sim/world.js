@@ -1,35 +1,10 @@
-export function makeWorld({ size, rng, threatCount, foodMultiplier = 1.0 }) {
-  const world = {
+export function makeWorld({ size }) {
+  return {
     size,
-    food: [],
+    crops: [],
+    foodPickups: [],
     threats: []
   };
-
-  // Seed some food piles
-  const baseFoodCount = Math.floor((size.w * size.h) / 18);
-  const foodCount = Math.max(1, Math.floor(baseFoodCount * Math.max(0.1, foodMultiplier)));
-
-  for (let i = 0; i < foodCount; i++) {
-    world.food.push({
-      id: `food_${i + 1}`,
-      x: rng.int(0, size.w - 1),
-      y: rng.int(0, size.h - 1),
-      amount: rng.int(3, 12)
-    });
-  }
-
-  // Seed threats (simple roaming hazards)
-  for (let i = 0; i < threatCount; i++) {
-    world.threats.push({
-      id: `threat_${i + 1}`,
-      x: rng.int(0, size.w - 1),
-      y: rng.int(0, size.h - 1),
-      danger: rng.next() * 0.8 + 0.2, // 0.2..1.0
-      roam: rng.next() * 0.7 + 0.3   // 0.3..1.0
-    });
-  }
-
-  return world;
 }
 
 export function clampToWorld(pos, size) {

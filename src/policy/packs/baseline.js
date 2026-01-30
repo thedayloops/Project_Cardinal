@@ -4,157 +4,96 @@ import { softmaxPick } from "../selectors/softmax.js";
 
 export const baselinePolicyPack = makePolicyPack({
   id: "baseline",
-  version: "0.2.0",
-  selectAction({ obs, rng, config }) {
-    const self = obs.self;
+  version: "0.3.6-dev",
 
-    const candidates = [
-      { a: Actions.rest(), label: "rest" },
-      { a: Actions.eat(), label: "eat" },
-      { a: Actions.investigate(), label: "investigate" },
-      { a: Actions.flee(), label: "flee" },
-      ...moveCandidates(rng)
-    ];
+  selectAction({ obs, rng }) {
+    const scored = [];
 
-    const scored = candidates.map(c => ({
-      item: c.a,
-      score: scoreAction({ obs, action: c.a, config })
-    }));
+    const hunger = obs.self.needs.hunger;
+    const fatigue = obs.self.needs.fatigue;
+    const fear = obs.self.emotions.fear.value;
+    const curiosity = obs.self.traits.curiosity ?? 0.5;
 
-    // bounded rationality: softmax
-    const fear = self.emotions.fear.value;
+    const nearbyFood = Array.isArray(obs.nearbyFood) ? obs.nearbyFood : [];
+    const ownedCropsNearby = Array.isArray(obs.ownedCropsNearby) ? obs.ownedCropsNearby : [];
+    const nearbyRipeCrops = Array.isArray(obs.nearbyRipeCrops) ? obs.nearbyRipeCrops : [];
+    const nearbyHunts = Array.isArray(obs.nearbyHunts) ? obs.nearbyHunts : [];
 
-    // fear increases "temperature" => more erratic switching
-    const temperature =
-      config.fear.temperatureBase +
-      config.fear.temperatureFearScale * fear;
+    const cropStats = obs.cropStats ?? { localCount: 0, localRipeCount: 0, globalCount: 0 };
 
-    return softmaxPick({ rng, scored, temperature });
+    // Eat
+    if (nearbyFood.length > 0) {
+      scored.push({ item: Actions.eat(), score: 1.8 * hunger });
+    }
+
+    // Rest
+    scored.push({ item: Actions.rest(), score: 1.1 * fatigue });
+
+    // Harvest owned ripe crop
+    if (ownedCropsNearby.length && ownedCropsNearby[0].d === 0) {
+      scored.push({ item: Actions.harvest(), score: 3.6 });
+    }
+
+    // Harvest any ripe crop if very hungry
+    if (nearbyRipeCrops.length && nearbyRipeCrops[0].d === 0) {
+      scored.push({ item: Actions.harvest(), score: 2.3 * hunger });
+    }
+
+    // Guard/wait near owned unripe crops
+    const ownsUnripeNearby = ownedCropsNearby.length > 0 && cropStats.localRipeCount === 0;
+    if (ownsUnripeNearby && hunger < 0.6) {
+      scored.push({ item: Actions.rest(), score: 1.9 * (1 - hunger) });
+      scored.push(...microMoves(0.35 * (1 - hunger)));
+    }
+
+    // HUNT as buffer when hungry and farms not ready
+    if (nearbyHunts.length > 0 && hunger > 0.35 && cropStats.localRipeCount === 0) {
+      const h = nearbyHunts[0];
+      const riskPenalty = Math.max(0.2, 1 - h.risk * 3) * (1 - fear);
+      scored.push({
+        item: Actions.hunt(h.id),
+        score: (1.4 * hunger) * riskPenalty
+      });
+    }
+
+    // Planting (investment)
+    const noLocal = cropStats.localCount === 0;
+    const lowGlobal = cropStats.globalCount < 0.15 * 160;
+    if (hunger > 0.18 && (noLocal || lowGlobal)) {
+      scored.push({
+        item: Actions.investigate(),
+        score: (0.6 + hunger) * (noLocal ? 1.4 : 0.7)
+      });
+    }
+
+    // Curiosity bootstrap
+    if (cropStats.globalCount === 0 && curiosity > 0.35) {
+      scored.push({
+        item: Actions.investigate(),
+        score: curiosity * 0.9 * (1 - hunger) * (1 - fear)
+      });
+    }
+
+    scored.push(...randomMoves(0.08));
+
+    return softmaxPick({
+      rng,
+      scored,
+      temperature: 0.7 + fear
+    });
   }
 });
 
-function moveCandidates(rng) {
+function randomMoves(score) {
   const dirs = [
     { dx: 1, dy: 0 },
     { dx: -1, dy: 0 },
     { dx: 0, dy: 1 },
     { dx: 0, dy: -1 }
   ];
-
-  const shuffled = dirs
-    .map(d => ({ d, r: rng.next() }))
-    .sort((a, b) => a.r - b.r)
-    .map(x => x.d);
-
-  return shuffled.map(d => ({ a: Actions.move(d.dx, d.dy), label: "move" }));
+  return dirs.map(d => ({ item: Actions.move(d.dx, d.dy), score }));
 }
 
-function scoreAction({ obs, action, config }) {
-  const self = obs.self;
-
-  const hunger = self.needs.hunger;
-  const fatigue = self.needs.fatigue;
-  const fear = self.emotions.fear.value;
-  const traits = self.traits;
-
-  const hasThreat = obs.nearbyThreats.length > 0;
-  const nearestThreat = obs.nearbyThreats[0] ?? null;
-  const nearestFood = obs.nearbyFood[0] ?? null;
-
-  // drives
-  const driveEat = hunger * 1.3;
-  const driveRest = fatigue * 1.2;
-
-  // fear effect (trait-moderated)
-  const fearEffect =
-    fear * (0.6 + 0.9 * traits.caution) * (1.15 - 0.85 * traits.boldness);
-
-  const riskAversion = config.fear.riskAversion * (0.7 + traits.caution);
-
-  // contract intent influence (small, bounded)
-  // intent never overrides direct fear/flee or urgent hunger; it just nudges movement.
-  const intent = self.contractIntent;
-
-  const contractMoveBonus = action.kind === "MOVE"
-    ? contractMoveAlignmentBonus({ obs, action, intent })
-    : 0;
-
-  switch (action.kind) {
-    case "EAT": {
-      if (!nearestFood) return -0.6;
-      const threatPenalty = hasThreat ? riskAversion * fearEffect * 0.8 : 0;
-      const benefit = driveEat * 1.6;
-      return benefit - threatPenalty;
-    }
-
-    case "REST": {
-      const threatPenalty = hasThreat ? 0.35 * riskAversion : 0;
-      const freezeBonus = hasThreat ? fearEffect * 0.55 : 0;
-      return driveRest * 1.35 + freezeBonus - threatPenalty;
-    }
-
-    case "FLEE": {
-      if (!hasThreat) return -0.25;
-      const closeness = threatCloseness(nearestThreat);
-      return 0.9 * closeness + 1.3 * fearEffect - 0.15 * fatigue;
-    }
-
-    case "INVESTIGATE": {
-      const curiosity = traits.curiosity;
-      const foodHope = nearestFood ? 0.35 : 0.05;
-      const threatPenalty = hasThreat ? (fearEffect * 1.25 + riskAversion * 0.4) : 0;
-      return 0.35 * curiosity + foodHope - threatPenalty - 0.1 * fatigue;
-    }
-
-    case "MOVE": {
-      const towardFood = nearestFood ? (hunger * 0.9) : 0.1;
-      const awayThreat = hasThreat ? (fearEffect * 0.8) : 0;
-      const cost = 0.1 * fatigue + 0.05 * hunger;
-
-      const threatenedPenalty = hasThreat ? 0.15 : 0;
-
-      // contract bonus is bounded so it won't dominate hunger/fear
-      return towardFood + awayThreat + contractMoveBonus - cost - threatenedPenalty;
-    }
-
-    case "IDLE":
-    default:
-      return -0.2;
-  }
-}
-
-function contractMoveAlignmentBonus({ obs, action, intent }) {
-  if (!intent) return 0;
-
-  // Only applies to MOVE actions: reward steps that reduce manhattan distance to a target.
-  const selfPos = obs.self.pos;
-
-  if (intent.kind === "GOTO" && intent.target) {
-    const before = manhattan(selfPos, intent.target);
-    const after = manhattan(
-      { x: selfPos.x + (action.payload.dx ?? 0), y: selfPos.y + (action.payload.dy ?? 0) },
-      intent.target
-    );
-
-    // improvement => bonus, regression => small penalty
-    const delta = before - after; // +1 means moved closer by 1
-    return clamp(delta * 0.22, -0.15, 0.45);
-  }
-
-  // FOLLOW_LEADER currently not resolvable to position in this slice; keep neutral
-  return 0;
-}
-
-function threatCloseness(th) {
-  if (!th) return 0;
-  const d = Math.sqrt(th.d2);
-  return 1 / (1 + d);
-}
-
-function manhattan(a, b) {
-  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
-}
-
-function clamp(v, lo, hi) {
-  return Math.max(lo, Math.min(hi, v));
+function microMoves(score) {
+  return randomMoves(score);
 }

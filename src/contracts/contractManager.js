@@ -25,7 +25,6 @@ export function makeContractManager({ rng, config, world, npcs }) {
         rng,
         config,
         world,
-        npcs,
         kind: ContractKinds.PATROL,
         spec: config.contracts.patrol,
         shuffled,
@@ -37,7 +36,6 @@ export function makeContractManager({ rng, config, world, npcs }) {
         rng,
         config,
         world,
-        npcs,
         kind: ContractKinds.HUNT,
         spec: config.contracts.hunt,
         shuffled,
@@ -49,7 +47,6 @@ export function makeContractManager({ rng, config, world, npcs }) {
         rng,
         config,
         world,
-        npcs,
         kind: ContractKinds.ESCORT,
         spec: config.contracts.escort,
         shuffled,
@@ -57,15 +54,11 @@ export function makeContractManager({ rng, config, world, npcs }) {
       });
 
       // build lookup + attach to NPCs
-      for (const c of mgr.contracts) {
-        for (const id of c.memberIds) mgr.byNpcId.set(id, c.id);
-      }
-      for (const npc of npcs) {
-        npc.contractId = mgr.byNpcId.get(npc.id) ?? null;
-      }
+      rebuildNpcContractIndex(mgr, npcs);
     },
 
     tick({ tick }) {
+      void tick;
       if (mgr.contracts.length === 0) return;
 
       for (const c of mgr.contracts) {
@@ -78,20 +71,14 @@ export function makeContractManager({ rng, config, world, npcs }) {
           c.leaderId = c.memberIds[0];
         }
 
+        // patrol route progress
         if (c.kind === ContractKinds.PATROL) {
           advancePatrolIfNeeded({ c, npcs });
         }
-
-        // keep byNpcId fresh (cheap at these scales)
-        for (const id of c.memberIds) mgr.byNpcId.set(id, c.id);
       }
 
-      // clear contractId for dead NPCs
-      for (const npc of npcs) {
-        if (!npc.alive) {
-          npc.contractId = null;
-        }
-      }
+      // refresh indices after maintenance
+      rebuildNpcContractIndex(mgr, npcs);
     },
 
     getContractForNpc(npc) {
@@ -102,6 +89,20 @@ export function makeContractManager({ rng, config, world, npcs }) {
 
   mgr.init();
   return mgr;
+}
+
+function rebuildNpcContractIndex(mgr, npcs) {
+  mgr.byNpcId.clear();
+
+  for (const c of mgr.contracts) {
+    for (const id of c.memberIds) {
+      mgr.byNpcId.set(id, c.id);
+    }
+  }
+
+  for (const npc of npcs) {
+    npc.contractId = npc.alive ? (mgr.byNpcId.get(npc.id) ?? null) : null;
+  }
 }
 
 function formContracts({ mgr, rng, config, world, kind, spec, shuffled, cursor }) {

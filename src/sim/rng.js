@@ -1,23 +1,52 @@
-// Deterministic PRNG: mulberry32
+/**
+ * Deterministic RNG (LCG)
+ * Backward + forward compatible.
+ *
+ * Exposes:
+ * - next()   -> raw uint32
+ * - float()  -> [0, 1)
+ * - int(a,b) -> integer range
+ * - chance(p)
+ */
+
 export function makeRng(seed) {
-  let t = seed >>> 0;
+  let state = seed >>> 0;
+
+  function nextUInt32() {
+    // Numerical Recipes LCG
+    state = (1664525 * state + 1013904223) >>> 0;
+    return state;
+  }
+
   return {
+    /**
+     * Legacy API — raw uint32
+     */
     next() {
-      t += 0x6D2B79F5;
-      let x = t;
-      x = Math.imul(x ^ (x >>> 15), x | 1);
-      x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
-      return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+      return nextUInt32();
     },
-    int(min, maxInclusive) {
-      const r = this.next();
-      return min + Math.floor(r * (maxInclusive - min + 1));
+
+    /**
+     * Canonical float API
+     */
+    float() {
+      return nextUInt32() / 0x100000000;
     },
-    pick(arr) {
-      return arr[this.int(0, arr.length - 1)];
+
+    /**
+     * Integer in [min, max]
+     */
+    int(min, max) {
+      if (max < min) [min, max] = [max, min];
+      const range = max - min + 1;
+      return min + (nextUInt32() % range);
     },
+
+    /**
+     * Boolean with probability p
+     */
     chance(p) {
-      return this.next() < p;
+      return this.float() < p;
     }
   };
 }

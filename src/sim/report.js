@@ -1,45 +1,72 @@
-import { summarizeMetrics } from "./metrics.js";
-
 export function makeRunReport({ config, metrics, eventLog, world, npcs }) {
+  const alive = npcs.filter(n => n.alive).length;
+  const dead = npcs.length - alive;
+
   return {
-    meta: {
-      seed: config.seed,
-      ticks: config.ticks,
-      dt: config.dt,
-      policyPack: config.policyPack
-    },
-    world: {
-      size: world.size,
-      foodCount: world.food.length,
-      threats: world.threats.length
-    },
+    seed: config.seed,
+    ticks: config.ticks,
+    policyPack: config.policyPack,
+    world: `${world.size.w}x${world.size.h}`,
+
     population: {
-      initial: config.npcCount,
-      alive: npcs.filter(n => n.alive).length
+      alive,
+      dead,
+      total: npcs.length
     },
-    metrics: summarizeMetrics(metrics),
-    recentEvents: eventLog.items.slice(-30)
+
+    environment: {
+      crops: world.crops?.length ?? 0,
+      foodPickups: world.foodPickups?.length ?? 0,
+      threats: world.threats?.length ?? 0
+    },
+
+    metrics,
+    recentEvents: readRecentEvents(eventLog, 30)
   };
 }
 
 export function formatRunReport(report) {
   const lines = [];
-  lines.push(`Run report`);
-  lines.push(`- seed: ${report.meta.seed}`);
-  lines.push(`- ticks: ${report.meta.ticks}`);
-  lines.push(`- policyPack: ${report.meta.policyPack}`);
-  lines.push(`- world: ${report.world.size.w}x${report.world.size.h}`);
-  lines.push(`- threats: ${report.world.threats}, food: ${report.world.foodCount}`);
-  lines.push(`- population alive: ${report.population.alive}/${report.population.initial}`);
-  lines.push(`- deaths: ${report.metrics.totals.deaths}`);
 
-  lines.push(`\nAction totals:`);
-  const keys = Object.keys(report.metrics.totals.actions).sort();
-  for (const k of keys) lines.push(`- ${k}: ${report.metrics.totals.actions[k]}`);
+  lines.push("Run report");
+  lines.push(`- seed: ${report.seed}`);
+  lines.push(`- ticks: ${report.ticks}`);
+  lines.push(`- policyPack: ${report.policyPack}`);
+  lines.push(`- world: ${report.world}`);
+  lines.push(
+    `- population alive: ${report.population.alive}/${report.population.total}`
+  );
+  lines.push(`- deaths: ${report.population.dead}`);
 
-  lines.push(`\nRecent events (last ${report.recentEvents.length}):`);
+  lines.push("");
+  lines.push("Environment:");
+  lines.push(`- crops: ${report.environment.crops}`);
+  lines.push(`- food pickups: ${report.environment.foodPickups}`);
+  lines.push(`- threats: ${report.environment.threats}`);
+
+  lines.push("");
+  lines.push("Recent events (last 30):");
   for (const e of report.recentEvents) {
-    lines.push(`- [t${e.tick}] ${e.type} ${e.msg ?? ""}`.trim());
+    lines.push(`- [t${e.tick}] ${e.type} ${e.msg}`);
   }
+
   return lines.join("\n");
+}
+
+/* ================= helpers ================= */
+
+function readRecentEvents(eventLog, n) {
+  if (Array.isArray(eventLog)) {
+    return eventLog.slice(-n);
+  }
+
+  if (Array.isArray(eventLog.events)) {
+    return eventLog.events.slice(-n);
+  }
+
+  if (typeof eventLog.getRecent === "function") {
+    return eventLog.getRecent(n);
+  }
+
+  return [];
 }
