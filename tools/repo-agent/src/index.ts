@@ -22,15 +22,14 @@ const agent = new Agent(
     repoRoot: cfg.repoRoot,
     artifactsDir: cfg.artifactsDir,
     guardrails: cfg.guardrails,
-    commandsAllowlist: cfg.commands.allowlist,
-    openai: cfg.openai,
-    watch: { includePrefixes: cfg.watch.includePrefixes }
+    commandsAllowlist: cfg.commands.allowlist
   },
   log,
   {
     postProposal: async (p) => discord.postProposal(p)
   }
 );
+
 
 const discord = new DiscordBot(
   {

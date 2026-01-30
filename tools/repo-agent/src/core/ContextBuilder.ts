@@ -9,15 +9,11 @@ export type Trigger =
 export type AgentContext = {
   trigger: Trigger;
   repo: {
-    status: string;
-    headSha: string;
     branch: string;
+    head: string;
+    status: string;
   };
-  diffHint: {
-    // Optional: last N changed file names (no content)
-    changedFiles: string[];
-  };
-  files: Array<{
+  files?: Array<{
     path: string;
     content: string;
   }>;
@@ -28,66 +24,36 @@ export class ContextBuilder {
     private repoRoot: string,
     private git: GitService,
     private opts: {
-      maxFiles: number;
-      maxBytesPerFile: number;
-      includePrefixes: string[];
+      maxFileBytes: number;
     }
   ) {}
 
-  async build(trigger: Trigger): Promise<AgentContext> {
-    const status = await this.git.statusSummary();
-    const headSha = await this.git.getHeadSha();
-    const branch = await this.git.getCurrentBranch();
-
-    const changedFiles = trigger.kind === "watch" ? trigger.changedPaths : [];
-
-    // Minimal, safe sampling: pick up to maxFiles from includePrefixes.
-    const sampled = await this.sampleFiles();
-
+  async buildMinimal(trigger: Trigger): Promise<AgentContext> {
     return {
       trigger,
-      repo: { status, headSha, branch },
-      diffHint: { changedFiles: changedFiles.slice(0, 50) },
-      files: sampled
+      repo: {
+        branch: await this.git.getCurrentBranch(),
+        head: await this.git.getHeadSha(),
+        status: await this.git.statusSummary()
+      }
     };
   }
 
-  private async sampleFiles(): Promise<Array<{ path: string; content: string }>> {
-    // Simple: walk includePrefixes and pick a few files, bounded.
-    const out: Array<{ path: string; content: string }> = [];
-    for (const prefix of this.opts.includePrefixes) {
-      const abs = path.resolve(this.repoRoot, prefix);
-      const exists = await fs
-        .stat(abs)
-        .then(() => true)
-        .catch(() => false);
-      if (!exists) continue;
+  async buildWithFiles(
+    base: AgentContext,
+    filePaths: string[]
+  ): Promise<AgentContext> {
+    const files = [];
 
-      const files = await this.walk(abs);
-      for (const f of files) {
-        if (out.length >= this.opts.maxFiles) return out;
-        const rel = path.relative(this.repoRoot, f).replaceAll("\\", "/");
-        const buf = await fs.readFile(f);
-        const sliced = buf.subarray(0, this.opts.maxBytesPerFile);
-        out.push({ path: rel, content: sliced.toString("utf8") });
-      }
+    for (const rel of filePaths) {
+      const abs = path.join(this.repoRoot, rel);
+      const buf = await fs.readFile(abs);
+      files.push({
+        path: rel,
+        content: buf.slice(0, this.opts.maxFileBytes).toString("utf8")
+      });
     }
-    return out;
-  }
 
-  private async walk(dirAbs: string): Promise<string[]> {
-    const ents = await fs.readdir(dirAbs, { withFileTypes: true });
-    const out: string[] = [];
-    for (const e of ents) {
-      const p = path.join(dirAbs, e.name);
-      if (e.isDirectory()) {
-        if (e.name === "node_modules" || e.name === ".git" || e.name === "dist") continue;
-        out.push(...(await this.walk(p)));
-      } else if (e.isFile()) {
-        if (e.name.endsWith(".png") || e.name.endsWith(".jpg") || e.name.endsWith(".lock")) continue;
-        out.push(p);
-      }
-    }
-    return out;
+    return { ...base, files };
   }
 }
