@@ -3,18 +3,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 
-// ----------------------------------------------------
-// Load .env from repo root
-// ----------------------------------------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// tools/repo-agent/src -> tools/repo-agent -> tools -> Project_Cardinal
-const envPath = path.resolve(__dirname, "../../.env");
-dotenv.config({ path: envPath });
-
-console.log("[bootstrap] Loaded env from:", envPath);
-// ----------------------------------------------------
+// dist -> repo-agent -> tools -> Project_Cardinal
+const projectRoot = path.resolve(__dirname, "../../..");
+dotenv.config({ path: path.join(projectRoot, ".env") });
 
 import { loadConfig } from "./core/Config.js";
 import { Agent } from "./core/Agent.js";
