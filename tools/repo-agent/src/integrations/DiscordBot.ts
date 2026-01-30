@@ -10,13 +10,13 @@ import {
   ButtonStyle,
   Interaction
 } from "discord.js";
+
+import { Agent, AgentRunMode } from "../core/Agent.js";
 import { Logger } from "../core/Logger.js";
-import { Agent, AgentRunMode, AgentProposal } from "../core/Agent.js";
-import { loadLedger } from "../util/tokenLedger.js";
 
 export class DiscordBot {
   private client: Client;
-  private pendingProposal: AgentProposal | null = null;
+  private pendingPlanId: string | null = null;
 
   constructor(
     private cfg: {
@@ -28,9 +28,7 @@ export class DiscordBot {
     private agent: Agent,
     private log: Logger
   ) {
-    this.client = new Client({
-      intents: [GatewayIntentBits.Guilds]
-    });
+    this.client = new Client({ intents: [GatewayIntentBits.Guilds] });
   }
 
   async start(): Promise<void> {
@@ -38,12 +36,9 @@ export class DiscordBot {
 
     this.client.on("interactionCreate", async (interaction) => {
       if (interaction.isChatInputCommand()) {
-        await interaction.deferReply({ ephemeral: false });
+        await interaction.deferReply();
         await this.handleSlash(interaction);
-        return;
-      }
-
-      if (interaction.isButton()) {
+      } else if (interaction.isButton()) {
         await this.handleButton(interaction);
       }
     });
@@ -52,33 +47,22 @@ export class DiscordBot {
     this.log.info("Discord bot logged in");
   }
 
-  private async registerCommands(): Promise<void> {
+  private async registerCommands() {
     const commands = [
       new SlashCommandBuilder()
-        .setName("agent_status")
-        .setDescription("Show repo agent status"),
-
-      new SlashCommandBuilder()
         .setName("agent_run")
-        .setDescription("Run the repo agent")
-        .addStringOption((opt) =>
-          opt
+        .setDescription("Run the repository agent")
+        .addStringOption((o) =>
+          o
             .setName("mode")
-            .setDescription("Run mode")
+            .setDescription("How deeply the agent should analyze the repo")
             .addChoices(
-              { name: "dry-run", value: "dry-run" },
+              { name: "scan", value: "scan" },
               { name: "plan", value: "plan" },
-              { name: "plan+verify", value: "plan+verify" }
+              { name: "verify", value: "verify" },
+              { name: "deep", value: "deep" }
             )
-        ),
-
-      new SlashCommandBuilder()
-        .setName("agent_explain")
-        .setDescription("Explain the last agent proposal"),
-
-      new SlashCommandBuilder()
-        .setName("agent_tokens")
-        .setDescription("Show exact LLM token usage")
+        )
     ].map((c) => c.toJSON());
 
     const rest = new REST({ version: "10" }).setToken(this.cfg.token);
@@ -86,139 +70,81 @@ export class DiscordBot {
       Routes.applicationGuildCommands(this.cfg.clientId, this.cfg.guildId),
       { body: commands }
     );
+
+    this.log.info("Slash commands registered");
   }
 
-  private async handleSlash(
-    interaction: ChatInputCommandInteraction
-  ): Promise<void> {
-    switch (interaction.commandName) {
-      case "agent_tokens": {
-        const ledger = await loadLedger("agent_artifacts");
+  private async handleSlash(interaction: ChatInputCommandInteraction) {
+    const mode = (interaction.options.getString("mode") as AgentRunMode) ?? "scan";
 
-        const maxCalls = Number(
-          process.env.AGENT_MAX_LLM_CALLS_PER_DAY ?? 50
-        );
+    await this.agent.trigger({
+      kind: "discord",
+      command: "agent_run",
+      mode
+    } as any);
 
-        await interaction.editReply(
-          `**LLM Token Usage (Today)**\n\n` +
-            `• Calls: ${ledger.calls} / ${maxCalls}\n` +
-            `• Input tokens: ${ledger.tokens.input}\n` +
-            `• Output tokens: ${ledger.tokens.output}\n` +
-            `• Total tokens: ${ledger.tokens.total}\n\n` +
-            `• Avg tokens/call: ${
-              ledger.calls > 0
-                ? Math.round(ledger.tokens.total / ledger.calls)
-                : 0
-            }`
-        );
-        return;
-      }
-
-      case "agent_status": {
-        const s = this.agent.getStatus();
-        await interaction.editReply(
-          `**Repo Agent Status**\n\n` +
-            `• Busy: ${s.busy ? "yes" : "no"}\n` +
-            `• Pending proposal: ${
-              s.pendingProposal
-                ? `${s.pendingProposal.plan} (${s.pendingProposal.planId})`
-                : "no"
-            }\n` +
-            `• Planner: ${s.planner}\n` +
-            `• Write phase: DISABLED`
-        );
-        return;
-      }
-
-      case "agent_run": {
-        const mode =
-          (interaction.options.getString("mode") as AgentRunMode) ??
-          "dry-run";
-
-        await this.agent.trigger({
-          kind: "discord",
-          command: "agent_run",
-          mode
-        });
-
-        const proposal = this.agent.getLastProposal();
-        if (!proposal) {
-          await interaction.editReply("No proposal generated.");
-          return;
-        }
-
-        this.pendingProposal = proposal;
-
-        await interaction.editReply({
-          content: this.renderProposal(proposal),
-          components: [this.buildButtons()]
-        });
-        return;
-      }
-
-      case "agent_explain": {
-        await interaction.editReply(
-          this.agent.getLastSummary() ??
-            "No agent proposal has been generated yet."
-        );
-        return;
-      }
-    }
-  }
-
-  private async handleButton(interaction: Interaction): Promise<void> {
-    if (!interaction.isButton()) return;
-
-    if (!this.pendingProposal) {
-      await interaction.reply({
-        content: "No pending proposal.",
-        ephemeral: true
-      });
+    const proposal = this.agent.getLastProposal();
+    if (!proposal) {
+      await interaction.editReply("No proposal generated.");
       return;
     }
 
-    if (interaction.customId === "agent_approve") {
+    this.pendingPlanId = proposal.planId;
+
+    await interaction.editReply({
+      content:
+        `**Repo Agent Proposal**\n\n` +
+        `Plan: ${proposal.plan}\n` +
+        `Branch: ${proposal.branch}\n` +
+        `Base: ${proposal.base}\n\n` +
+        `**Summary**\n${proposal.summary}\n\n` +
+        `**Verification**\n${proposal.verification}\n\n` +
+        `**Diff (snippet)**\n\`\`\`\n${proposal.diffSnippet}\n\`\`\``,
+      components: [
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId("approve")
+            .setLabel("Approve & Apply")
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId("merge")
+            .setLabel("Merge")
+            .setStyle(ButtonStyle.Primary),
+          new ButtonBuilder()
+            .setCustomId("reject")
+            .setLabel("Reject")
+            .setStyle(ButtonStyle.Danger)
+        )
+      ]
+    });
+  }
+
+  private async handleButton(interaction: Interaction) {
+    if (!interaction.isButton() || !this.pendingPlanId) return;
+
+    if (interaction.customId === "approve") {
+      const res = await this.agent.executeApproval(this.pendingPlanId);
       await interaction.update({
-        content:
-          "✅ Proposal approved.\n(No merge executed — write phase disabled.)",
+        content: `Patch applied on branch **${res.branch}**`,
         components: []
       });
-      this.pendingProposal = null;
-      return;
     }
 
-    if (interaction.customId === "agent_reject") {
+    if (interaction.customId === "merge") {
+      await this.agent.mergeLastExecution();
+      this.pendingPlanId = null;
       await interaction.update({
-        content: "❌ Proposal rejected.",
+        content: "Branch merged into base.",
         components: []
       });
-      this.pendingProposal = null;
-      return;
     }
-  }
 
-  private buildButtons() {
-    return new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId("agent_approve")
-        .setLabel("Approve & Merge")
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId("agent_reject")
-        .setLabel("Reject")
-        .setStyle(ButtonStyle.Danger)
-    );
-  }
-
-  private renderProposal(p: AgentProposal): string {
-    return (
-      `**Repo Agent Proposal**\n` +
-      `Plan: ${p.plan}\n` +
-      `Branch: ${p.branch}\n` +
-      `Base: ${p.base} (HEAD before: ${p.headBefore})\n\n` +
-      `**Summary**\n${p.summary}\n\n` +
-      `**Verification**\n${p.verification}\n\n` +
-      `**Diff (snippet)**\n${p.diffSnippet}`
-    );
+    if (interaction.customId === "reject") {
+      this.pendingPlanId = null;
+      await interaction.update({
+        content: "Proposal rejected.",
+        components: []
+      });
+    }
   }
 }

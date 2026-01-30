@@ -7,14 +7,11 @@ export type FilePlan = {
 };
 
 export interface IPlanner {
-  /**
-   * Phase 1: decide WHICH files need changes.
-   * Must be cheap.
-   */
   planFiles(ctx: AgentContext): Promise<FilePlan>;
 
   /**
-   * Phase 2: produce an actual PatchPlan.
+   * Propose a structured, reversible patch plan.
+   * Must read scope from ctx.scope.files.
    */
   planPatch(ctx: AgentContext): Promise<PatchPlan>;
 }

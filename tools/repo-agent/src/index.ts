@@ -1,67 +1,41 @@
-import dotenv from "dotenv";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import dotenv from "dotenv";
 
-import { Logger } from "./core/Logger.js";
 import { loadConfig } from "./core/Config.js";
 import { Agent } from "./core/Agent.js";
 import { DiscordBot } from "./integrations/DiscordBot.js";
+import { Logger } from "./core/Logger.js";
 
-/**
- * Resolve __dirname in ESM
- */
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-/**
- * Attempt to locate repo-root .env safely.
- * Priority:
- *  1. process.cwd()
- *  2. relative to this file (dist or src)
- */
-function loadEnv(): void {
-  const candidates = [
-    path.resolve(process.cwd(), ".env"),
-    path.resolve(__dirname, "../../../.env"),
-    path.resolve(__dirname, "../../.env")
-  ];
-
-  for (const p of candidates) {
-    if (fs.existsSync(p)) {
-      dotenv.config({ path: p });
-      return;
-    }
+function findEnv(start: string): string {
+  let dir = start;
+  while (true) {
+    const candidate = path.join(dir, ".env");
+    if (fs.existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) throw new Error("Could not locate .env");
+    dir = parent;
   }
-
-  // Still call dotenv so it can report diagnostics
-  dotenv.config();
 }
 
-loadEnv();
+dotenv.config({ path: findEnv(__dirname) });
 
-async function main(): Promise<void> {
+async function main() {
+  const cfg = loadConfig();
   const log = new Logger();
 
-  // Validate env + config AFTER dotenv
-  const cfg = loadConfig();
+  const agent = new Agent({
+    repoRoot: cfg.repoRoot,
+    artifactsDir: cfg.artifactsDir,
+    guardrails: cfg.guardrails,
+    commandsAllowlist: {}
+  });
 
-  const agent = new Agent(
-    {
-      repoRoot: cfg.repoRoot,
-      artifactsDir: cfg.artifactsDir,
-      guardrails: cfg.guardrails,
-      commandsAllowlist: cfg.commands.allowlist
-    },
-    log,
-    {
-      postProposal: async (proposal) => {
-        log.info("Proposal generated", { planId: proposal.planId });
-      }
-    }
-  );
-
-  const discord = new DiscordBot(
+  const bot = new DiscordBot(
     {
       token: cfg.discord.token,
       clientId: cfg.discord.clientId,
@@ -72,11 +46,7 @@ async function main(): Promise<void> {
     log
   );
 
-  await discord.start();
-  log.info("Repo agent started");
+  await bot.start();
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+main().catch(console.error);

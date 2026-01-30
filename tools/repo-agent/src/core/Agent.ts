@@ -1,170 +1,125 @@
 import path from "node:path";
-import { Logger } from "./Logger.js";
-import { GitService } from "./GitService.js";
-import { ContextBuilder, Trigger } from "./ContextBuilder.js";
-import { createPlanner } from "./PlannerFactory.js";
-import { ensureDir, writeFileAtomic } from "../util/fsSafe.js";
-import { cleanupArtifacts } from "../util/cleanupArtifacts.js";
+import fs from "node:fs/promises";
+import simpleGit from "simple-git";
 
-export type AgentRunMode = "dry-run" | "plan" | "plan+verify";
+import { ContextBuilder, AgentContext } from "./ContextBuilder.js";
+import { createPlanner } from "./PlannerFactory.js";
+import { PatchPlan } from "../schemas/PatchPlan.js";
+
+export type AgentRunMode = "scan" | "plan" | "verify" | "deep";
 
 export type AgentProposal = {
   planId: string;
   plan: string;
   branch: string;
   base: string;
-  headBefore: string;
   summary: string;
   verification: string;
   diffSnippet: string;
+  patchPlan?: PatchPlan;
 };
 
 export class Agent {
-  private busy = false;
-  private queuedTrigger: Trigger | null = null;
-
-  private lastSummary: string | null = null;
   private lastProposal: AgentProposal | null = null;
+  private lastAppliedBranch: string | null = null;
 
   constructor(
     private cfg: {
       repoRoot: string;
       artifactsDir: string;
       guardrails: {
+        maxOps: number;
+        maxTotalWriteBytes: number;
         lockedPathPrefixes: string[];
         deniedPathPrefixes: string[];
-        maxTotalWriteBytes: number;
-        maxOps: number;
       };
-      commandsAllowlist: Record<
-        string,
-        { cmd: string; args: string[]; cwd?: string }
-      >;
-    },
-    private log: Logger,
-    private deps: {
-      postProposal: (p: AgentProposal) => Promise<void>;
+      commandsAllowlist: Record<string, unknown>;
     }
   ) {}
 
-  /* ---------- Introspection ---------- */
+  async trigger(trigger: {
+    kind: "discord" | "manual" | "watcher";
+    command?: string;
+    mode?: AgentRunMode;
+  }) {
+    const git = simpleGit({ baseDir: this.cfg.repoRoot });
 
-  getLastSummary(): string | null {
-    return this.lastSummary;
+    const ctxBuilder = new ContextBuilder(
+      this.cfg.repoRoot,
+      git,
+      { maxFileBytes: 25_000 }
+    );
+
+    const ctx: AgentContext = await ctxBuilder.buildMinimal(trigger);
+
+    ctx.scope = {
+      files: ctx.files.map(f => f.path),
+      total_ops: 0,
+      estimated_bytes_changed: 0
+    };
+
+    const planner = createPlanner(
+      trigger.mode ?? "scan",
+      this.cfg.repoRoot,
+      this.cfg.artifactsDir
+    );
+
+    const patchPlan = await planner.planPatch(ctx);
+    const planId = `plan_${Date.now()}`;
+
+    await this.persistPatch(planId, patchPlan);
+
+    this.lastProposal = {
+      planId,
+      plan: patchPlan.meta.goal,
+      branch: "(dry-run)",
+      base: "HEAD",
+      summary: patchPlan.meta.rationale,
+      verification:
+        patchPlan.verification.steps.length
+          ? patchPlan.verification.steps.join(", ")
+          : "Not executed",
+      diffSnippet: "(no changes)",
+      patchPlan
+    };
   }
 
-  getLastProposal(): AgentProposal | null {
+  getLastProposal() {
     return this.lastProposal;
   }
 
-  getStatus() {
-    return {
-      busy: this.busy,
-      pendingProposal: this.lastProposal
-        ? {
-            planId: this.lastProposal.planId,
-            plan: this.lastProposal.plan
-          }
-        : null,
-      lastSummary: this.lastSummary,
-      planner:
-        process.env.AGENT_ENABLE_LLM === "true"
-          ? "OpenAI (file-selection only)"
-          : "Stub (no-op)",
-      writeEnabled: false,
-      autoMergeEnabled: false
-    };
+  async executeApproval(planId: string) {
+    const git = simpleGit({ baseDir: this.cfg.repoRoot });
+    const branch = `agent/${planId}`;
+
+    await git.checkoutLocalBranch(branch);
+    await git.add(".");
+    await git.commit(`repo-agent: apply ${planId}`);
+
+    this.lastAppliedBranch = branch;
+    return { branch };
   }
 
-  /* ---------- Execution ---------- */
-
-  async trigger(
-    trigger: Trigger & { mode?: AgentRunMode }
-  ): Promise<void> {
-    if (this.busy) {
-      this.queuedTrigger = trigger;
-      return;
+  async mergeLastExecution() {
+    if (!this.lastAppliedBranch) {
+      throw new Error("No applied branch to merge");
     }
 
-    this.busy = true;
-    try {
-      await this.runOnce(trigger);
-    } finally {
-      this.busy = false;
-      if (this.queuedTrigger) {
-        const next = this.queuedTrigger;
-        this.queuedTrigger = null;
-        await this.trigger(next);
-      }
-    }
+    const git = simpleGit({ baseDir: this.cfg.repoRoot });
+    const base = (await git.revparse(["--abbrev-ref", "HEAD"])).trim();
+
+    await git.checkout(base);
+    await git.merge([this.lastAppliedBranch]);
+    await git.branch(["-D", this.lastAppliedBranch]);
+
+    this.lastAppliedBranch = null;
   }
 
-  private async runOnce(
-    trigger: Trigger & { mode?: AgentRunMode }
-  ): Promise<void> {
-    const mode: AgentRunMode = trigger.mode ?? "dry-run";
-
-    const git = new GitService(this.cfg.repoRoot);
-    const headBefore = await git.getHeadSha();
-
-    const contextBuilder = new ContextBuilder(this.cfg.repoRoot, git, {
-      maxFileBytes: 25_000
-    });
-
-    const planner = createPlanner();
-    const baseCtx = await contextBuilder.buildMinimal(trigger);
-    const filePlan = await planner.planFiles(baseCtx);
-
-    const planId = `plan_${Date.now()}`;
-
-    let summary = "No files require changes.";
-    let planLabel = "noop";
-
-    if (filePlan.files.length > 0) {
-      planLabel = "files-selected";
-      summary =
-        "Agent identified the following file(s) as potentially relevant:\n" +
-        filePlan.files.map((f) => `- ${f}`).join("\n");
-    }
-
-    const proposal: AgentProposal = {
-      planId,
-      plan: planLabel,
-      branch: "(dry-run)",
-      base: "HEAD",
-      headBefore,
-      summary,
-      verification: "Not executed",
-      diffSnippet: "(no changes)"
-    };
-
-    this.lastSummary = summary;
-    this.lastProposal = proposal;
-
-    // Persist artifact
-    await ensureDir(this.cfg.artifactsDir);
-    await writeFileAtomic(
-      path.join(this.cfg.artifactsDir, `${planId}_files.json`),
-      JSON.stringify({ mode, ...filePlan }, null, 2)
-    );
-
-    // Emit proposal to Discord
-    await this.deps.postProposal(proposal);
-
-    // Cleanup old artifacts safely
-    await cleanupArtifacts(
+  private async persistPatch(planId: string, plan: PatchPlan) {
+    const file = path.join(
       this.cfg.artifactsDir,
-      {
-        maxCount: Number(process.env.AGENT_ARTIFACT_MAX_COUNT ?? 25),
-        maxAgeMs:
-          Number(process.env.AGENT_ARTIFACT_MAX_AGE_DAYS ?? 7) *
-          24 *
-          60 *
-          60 *
-          1000,
-        keepPlanIds: new Set([planId])
-      },
-      this.log
+      `${planId}_patch.json`
     );
+    await fs.writeFile(file, JSON.stringify(plan, null, 2), "utf8");
   }
 }

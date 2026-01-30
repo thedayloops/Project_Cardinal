@@ -1,14 +1,22 @@
-import { IPlanner } from "./IPlanner.js";
-import { StubPlanner } from "./StubPlanner.js";
+import { AgentContext } from "./ContextBuilder.js";
+import { PatchPlan } from "../schemas/PatchPlan.js";
 import { OpenAIPlanner } from "./OpenAIPlanner.js";
+import { StubPlanner } from "./StubPlanner.js";
 
-export function createPlanner(): IPlanner {
-  if (process.env.AGENT_ENABLE_LLM === "true") {
-    return new OpenAIPlanner(
-      process.env.OPENAI_API_KEY!,
-      process.env.OPENAI_MODEL || "gpt-5-mini",
-      process.env.AGENT_ARTIFACTS_DIR || "agent_artifacts"
-    );
+export interface IPlanner {
+  planPatch(ctx: AgentContext): Promise<PatchPlan>;
+}
+
+export function createPlanner(
+  mode: "scan" | "plan" | "verify" | "deep",
+  repoRoot: string,
+  artifactsDir: string
+): IPlanner {
+  // For now: OpenAI planner is gated / stubbed
+  // You can later switch by mode
+  if (mode === "scan") {
+    return new StubPlanner();
   }
-  return new StubPlanner();
+
+  return new OpenAIPlanner(repoRoot, artifactsDir);
 }

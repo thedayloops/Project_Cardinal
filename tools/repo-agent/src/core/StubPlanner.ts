@@ -3,35 +3,30 @@ import { AgentContext } from "./ContextBuilder.js";
 import { PatchPlan } from "../schemas/PatchPlan.js";
 
 export class StubPlanner implements IPlanner {
-  async planFiles(_: AgentContext): Promise<FilePlan> {
+  async planFiles(_ctx: AgentContext): Promise<FilePlan> {
     return {
-      intent: "stub-no-op",
+      intent: "noop",
       files: []
     };
   }
 
-  async planPatch(_: AgentContext): Promise<PatchPlan> {
+  async planPatch(_ctx: AgentContext): Promise<PatchPlan> {
     return {
       meta: {
-        planId: "stub",
-        createdAtIso: new Date().toISOString(),
-        baseRef: "HEAD",
-        branchName: "agent/stub",
-        commitMessage: "stub: no-op",
-        unlockPathPrefixes: [],
-        rollback: {
-          strategy: "git_branch",
-          baseHead: "HEAD",
-          instructions: "Delete branch"
-        }
+        goal: "No changes",
+        rationale: "Stub planner does not propose patches",
+        confidence: 1.0
       },
-      intent: "No-op stub",
+      scope: {
+        files: [],
+        total_ops: 0,
+        estimated_bytes_changed: 0
+      },
       ops: [],
-      verify: { commands: [] },
-      notes: {
-        summary: "Stub planner produced no changes.",
-        risks: [],
-        followups: []
+      expected_effects: [],
+      verification: {
+        steps: [],
+        success_criteria: []
       }
     };
   }

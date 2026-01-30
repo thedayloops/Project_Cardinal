@@ -1,88 +1,107 @@
 import path from "node:path";
-import { PatchPlan } from "../schemas/PatchPlan.js";
-import { toPosix } from "../util/paths.js";
+import { PatchPlan, PatchOp } from "../schemas/PatchPlan.js";
+
+export type GuardrailConfig = {
+  repoRoot: string;
+
+  lockedPathPrefixes: string[];
+  deniedPathPrefixes: string[];
+
+  maxOps: number;
+  maxTotalPatchBytes: number;
+};
 
 export class Guardrails {
-  constructor(
-    private repoRoot: string,
-    private opts: {
-      lockedPathPrefixes: string[];
-      deniedPathPrefixes: string[];
-      maxTotalWriteBytes: number;
-      maxOps: number;
-    }
-  ) {}
+  constructor(private cfg: GuardrailConfig) {}
 
-  validatePlan(plan: PatchPlan): { ok: true } | { ok: false; reason: string } {
-    if (plan.ops.length > this.opts.maxOps) {
-      return { ok: false, reason: `Too many ops (${plan.ops.length} > ${this.opts.maxOps})` };
+  validatePatchPlan(plan: PatchPlan): void {
+    if (plan.ops.length > this.cfg.maxOps) {
+      throw new Error(
+        `PatchPlan exceeds max ops (${plan.ops.length} > ${this.cfg.maxOps})`
+      );
     }
 
-    const unlocks = new Set(plan.meta.unlockPathPrefixes.map((p) => normalizePrefix(p)));
-    const denied = this.opts.deniedPathPrefixes.map(normalizePrefix);
-    const locked = this.opts.lockedPathPrefixes.map(normalizePrefix);
-
-    let totalWriteBytes = 0;
+    let totalPatchBytes = 0;
 
     for (const op of plan.ops) {
-      const pathsToCheck: string[] =
-        op.type === "rename"
-          ? [op.from, op.to]
-          : op.type === "delete"
-            ? [op.path]
-            : [op.path];
-
-      for (const rel of pathsToCheck) {
-        const relPosix = toPosix(rel).replace(/^\/+/, "");
-        if (!relPosix || relPosix.includes("..")) {
-          return { ok: false, reason: `Invalid path traversal: ${rel}` };
-        }
-        if (path.isAbsolute(relPosix)) {
-          return { ok: false, reason: `Absolute paths not allowed: ${rel}` };
-        }
-
-        // denylist
-        for (const d of denied) {
-          if (relPosix.startsWith(d)) return { ok: false, reason: `Denied path: ${relPosix}` };
-        }
-
-        // locked paths require explicit unlock
-        const isLocked = locked.some((l) => relPosix.startsWith(l));
-        if (isLocked) {
-          const unlocked = Array.from(unlocks).some((u) => relPosix.startsWith(u));
-          if (!unlocked) return { ok: false, reason: `Locked path without unlock: ${relPosix}` };
-        }
-
-        // must be within repo (relative check done above; enforce repoRoot joining discipline elsewhere)
-        const abs = path.resolve(this.repoRoot, relPosix);
-        const relBack = path.relative(this.repoRoot, abs);
-        if (relBack.startsWith("..") || path.isAbsolute(relBack)) {
-          return { ok: false, reason: `Path escapes repo: ${relPosix}` };
-        }
-      }
-
-      if (op.type === "create" || op.type === "update") {
-        totalWriteBytes += Buffer.byteLength(op.content, "utf8");
-      }
+      this.validateOp(op);
+      totalPatchBytes += Buffer.byteLength(op.patch, "utf8");
     }
 
-    if (totalWriteBytes > this.opts.maxTotalWriteBytes) {
-      return {
-        ok: false,
-        reason: `Too much write content (${totalWriteBytes} bytes > ${this.opts.maxTotalWriteBytes})`
-      };
+    if (totalPatchBytes > this.cfg.maxTotalPatchBytes) {
+      throw new Error(
+        `PatchPlan exceeds max patch bytes (${totalPatchBytes} > ${this.cfg.maxTotalPatchBytes})`
+      );
     }
-
-    // Rollback must be present and plausible
-    if (!plan.meta.rollback?.instructions || plan.meta.rollback.instructions.length < 10) {
-      return { ok: false, reason: "Missing rollback instructions" };
-    }
-
-    return { ok: true };
   }
-}
 
-function normalizePrefix(p: string): string {
-  const posix = toPosix(p).replace(/^\/+/, "");
-  return posix;
+  private validateOp(op: PatchOp): void {
+    const normalized = path.normalize(op.file);
+
+    // deny/lock prefixes are relative-path checks (repo-root sandbox is enforced elsewhere)
+    for (const denied of this.cfg.deniedPathPrefixes) {
+      if (normalized.startsWith(denied)) {
+        throw new Error(`Patch targets denied path: ${op.file}`);
+      }
+    }
+
+    for (const locked of this.cfg.lockedPathPrefixes) {
+      if (normalized.startsWith(locked)) {
+        throw new Error(`Patch targets locked path: ${op.file}`);
+      }
+    }
+
+    if (op.reversible !== true) {
+      throw new Error(`All ops must be reversible (op ${op.id})`);
+    }
+
+    // Basic line sanity (even for file ops we keep start_line=1)
+    if (op.start_line < 1) {
+      throw new Error(`start_line must be >= 1 (op ${op.id})`);
+    }
+    if (op.end_line !== null && op.end_line < op.start_line) {
+      throw new Error(`end_line must be >= start_line (op ${op.id})`);
+    }
+
+    switch (op.type) {
+      case "replace_range":
+        if (op.end_line === null) {
+          throw new Error(`replace_range requires end_line (op ${op.id})`);
+        }
+        return;
+
+      case "insert_after":
+        if (op.end_line !== null) {
+          throw new Error(`insert_after must have end_line=null (op ${op.id})`);
+        }
+        return;
+
+      case "delete_range":
+        if (op.end_line === null) {
+          throw new Error(`delete_range requires end_line (op ${op.id})`);
+        }
+        if (op.patch.trim().length > 0) {
+          throw new Error(`delete_range patch must be empty (op ${op.id})`);
+        }
+        return;
+
+      case "create_file":
+        if (op.end_line !== null) {
+          throw new Error(`create_file must have end_line=null (op ${op.id})`);
+        }
+        // allow any patch content (may be empty but usually not)
+        return;
+
+      case "update_file":
+        if (op.end_line !== null) {
+          throw new Error(`update_file must have end_line=null (op ${op.id})`);
+        }
+        return;
+
+      default: {
+        const _exhaustive: never = op.type;
+        throw new Error(`Unknown op type: ${_exhaustive}`);
+      }
+    }
+  }
 }
