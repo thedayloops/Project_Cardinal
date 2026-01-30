@@ -1,22 +1,36 @@
-import { AgentContext } from "./ContextBuilder.js";
-import { PatchPlan } from "../schemas/PatchPlan.js";
+// tools/repo-agent/src/core/PlannerFactory.ts
 import { OpenAIPlanner } from "./OpenAIPlanner.js";
 import { StubPlanner } from "./StubPlanner.js";
+import type { AgentConfig } from "./Config.js";
+
+export type PlannerInput = {
+  // keep this loose; planners only need what they use
+  repo: {
+    root: string;
+    headSha: string;
+    branch: string;
+  };
+  scope: {
+    files: string[];
+    total_ops: number;
+    estimated_bytes_changed: number;
+  };
+  reason?: string;
+  mode: string;
+  filesPreview: Array<{ path: string; content: string }>;
+};
 
 export interface IPlanner {
-  planPatch(ctx: AgentContext): Promise<PatchPlan>;
+  planPatch(input: PlannerInput): Promise<any>;
 }
 
-export function createPlanner(
-  mode: "scan" | "plan" | "verify" | "deep",
-  repoRoot: string,
-  artifactsDir: string
-): IPlanner {
-  // For now: OpenAI planner is gated / stubbed
-  // You can later switch by mode
-  if (mode === "scan") {
-    return new StubPlanner();
+export function createPlanner(cfg: AgentConfig): IPlanner {
+  if (cfg.enableLLM) {
+    return new OpenAIPlanner({
+      apiKey: cfg.openai.apiKey,
+      planningModel: cfg.openai.model,
+      patchModel: cfg.openai.patchModel,
+    });
   }
-
-  return new OpenAIPlanner(repoRoot, artifactsDir);
+  return new StubPlanner();
 }

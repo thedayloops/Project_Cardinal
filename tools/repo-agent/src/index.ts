@@ -1,3 +1,4 @@
+// tools/repo-agent/src/index.ts
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -6,8 +7,8 @@ import dotenv from "dotenv";
 import { loadConfig } from "./core/Config.js";
 import { Agent } from "./core/Agent.js";
 import { DiscordBot } from "./integrations/DiscordBot.js";
-import { Logger } from "./core/Logger.js";
 
+// Load .env by walking upward (monorepo-safe)
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -26,27 +27,25 @@ dotenv.config({ path: findEnv(__dirname) });
 
 async function main() {
   const cfg = loadConfig();
-  const log = new Logger();
-
-  const agent = new Agent({
-    repoRoot: cfg.repoRoot,
-    artifactsDir: cfg.artifactsDir,
-    guardrails: cfg.guardrails,
-    commandsAllowlist: {}
-  });
+  const agent = new Agent(cfg);
 
   const bot = new DiscordBot(
     {
       token: cfg.discord.token,
       clientId: cfg.discord.clientId,
       guildId: cfg.discord.guildId,
-      channelId: cfg.discord.channelId
+      channelId: cfg.discord.channelId,
     },
-    agent,
-    log
+    agent
   );
 
   await bot.start();
+  // eslint-disable-next-line no-console
+  console.log("[repo-agent] online");
 }
 
-main().catch(console.error);
+main().catch((err) => {
+  // eslint-disable-next-line no-console
+  console.error(err);
+  process.exit(1);
+});
