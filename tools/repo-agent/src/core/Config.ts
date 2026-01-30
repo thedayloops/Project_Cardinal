@@ -3,7 +3,9 @@ import path from "node:path";
 
 function mustEnv(key: string): string {
   const v = process.env[key];
-  if (!v || v.trim() === "") throw new Error(`Missing required env var: ${key}`);
+  if (!v || v.trim() === "") {
+    throw new Error(`Missing required env var: ${key}`);
+  }
   return v.trim();
 }
 
@@ -37,8 +39,8 @@ export type AgentConfig = {
 
   openai: {
     apiKey: string;
-    model: string; // planning model
-    patchModel: string; // patch model
+    model: string;        // planning model
+    patchModel: string;   // patch model
   };
 
   guardrails: {
@@ -62,31 +64,47 @@ export function loadConfig(): AgentConfig {
     ? path.resolve(process.env.REPO_ROOT)
     : process.cwd();
 
+  const enableLLM = boolEnv("AGENT_ENABLE_LLM", false);
+
+  // Discord is ALWAYS required
+  const discord = {
+    token: mustEnv("DISCORD_TOKEN"),
+    clientId: mustEnv("DISCORD_CLIENT_ID"),
+    guildId: mustEnv("DISCORD_GUILD_ID"),
+    channelId: mustEnv("DISCORD_CHANNEL_ID"),
+  };
+
+  // Guardrails are ALWAYS required (with defaults)
+  const guardrails = {
+    maxFileBytes: numEnv("AGENT_MAX_FILE_BYTES", 25_000),
+    maxOps: numEnv("AGENT_MAX_OPS", 20),
+    maxTotalWriteBytes: numEnv("AGENT_MAX_WRITE_BYTES", 200_000),
+    lockedPathPrefixes: listEnv("AGENT_LOCKED_PATHS"),
+    deniedPathPrefixes: listEnv("AGENT_DENIED_PATHS"),
+  };
+
+  // OpenAI is CONDITIONALLY required
+  const openai = enableLLM
+    ? {
+        apiKey: mustEnv("OPENAI_API_KEY"),
+        model: process.env.OPENAI_MODEL?.trim() || "gpt-5-mini",
+        patchModel: process.env.OPENAI_MODEL_PATCH?.trim() || "gpt-5",
+      }
+    : {
+        // Safe placeholders; never used when enableLLM=false
+        apiKey: "",
+        model: "",
+        patchModel: "",
+      };
+
   return {
     repoRoot,
     artifactsDir: process.env.AGENT_ARTIFACTS_DIR ?? "agent_artifacts",
 
-    enableLLM: boolEnv("AGENT_ENABLE_LLM", false),
+    enableLLM,
 
-    openai: {
-      apiKey: mustEnv("OPENAI_API_KEY"),
-      model: process.env.OPENAI_MODEL?.trim() || "gpt-5-mini",
-      patchModel: process.env.OPENAI_MODEL_PATCH?.trim() || "gpt-5",
-    },
-
-    guardrails: {
-      maxFileBytes: numEnv("AGENT_MAX_FILE_BYTES", 25_000),
-      maxOps: numEnv("AGENT_MAX_OPS", 20),
-      maxTotalWriteBytes: numEnv("AGENT_MAX_WRITE_BYTES", 200_000),
-      lockedPathPrefixes: listEnv("AGENT_LOCKED_PATHS"),
-      deniedPathPrefixes: listEnv("AGENT_DENIED_PATHS"),
-    },
-
-    discord: {
-      token: mustEnv("DISCORD_TOKEN"),
-      clientId: mustEnv("DISCORD_CLIENT_ID"),
-      guildId: mustEnv("DISCORD_GUILD_ID"),
-      channelId: mustEnv("DISCORD_CHANNEL_ID"),
-    },
+    openai,
+    guardrails,
+    discord,
   };
 }
