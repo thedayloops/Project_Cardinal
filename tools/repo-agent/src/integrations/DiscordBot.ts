@@ -69,8 +69,20 @@ export class DiscordBot {
 
       try {
         const proposal = await this.agent.run(mode, reason ?? null);
-        this.pendingPlanId = proposal.planId;
+        this.pendingPlanId = proposal.planId ?? null;
 
+        // 🚨 NO PATCH PLAN (stub / disabled / noop)
+        if (!proposal.patchPlan) {
+          await interaction.editReply({
+            content:
+              "⚠️ **Agent completed with no changes**\n" +
+              `PlanId: \`${proposal.planId}\`\n` +
+              "Reason: planning is disabled or no actionable changes were found.",
+          });
+          return;
+        }
+
+        // ✅ REAL PLAN
         const plan = proposal.patchPlan;
         const fullJson = JSON.stringify(plan, null, 2);
 
