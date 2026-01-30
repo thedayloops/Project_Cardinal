@@ -1,191 +1,224 @@
 import {
-    ActionRowBuilder,
-    ButtonBuilder,
-    ButtonStyle,
-    ChatInputCommandInteraction,
-    Client,
-    GatewayIntentBits,
-    Interaction,
-    REST,
-    Routes,
-    SlashCommandBuilder,
-    TextChannel
+  Client,
+  GatewayIntentBits,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  ChatInputCommandInteraction,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  Interaction
 } from "discord.js";
-import fs from "node:fs/promises";
-import path from "node:path";
-
-export type Proposal = {
-    planId: string;
-    branchName: string;
-    baseRef: string;
-    headBefore: string;
-    summary: string;
-    diffSnippet: string;
-    verificationSummary: string;
-};
+import { Logger } from "../core/Logger.js";
+import { Agent, AgentRunMode, AgentProposal } from "../core/Agent.js";
+import { loadLedger } from "../util/tokenLedger.js";
 
 export class DiscordBot {
-    private client: Client;
-    private channel: TextChannel | null = null;
+  private client: Client;
+  private pendingProposal: AgentProposal | null = null;
 
-    constructor(
-        private cfg: {
-            token: string;
-            clientId: string;
-            guildId: string;
-            channelId: string;
-            artifactsDir: string;
-        },
-        private handlers: {
-            onCommand: (i: ChatInputCommandInteraction) => Promise<void>;
-            onApprove: (planId: string, interaction: Interaction) => Promise<void>;
-            onReject: (planId: string, interaction: Interaction) => Promise<void>;
-        }
-    ) {
-        this.client = new Client({ intents: [GatewayIntentBits.Guilds] });
-    }
+  constructor(
+    private cfg: {
+      token: string;
+      clientId: string;
+      guildId: string;
+      channelId: string;
+    },
+    private agent: Agent,
+    private log: Logger
+  ) {
+    this.client = new Client({
+      intents: [GatewayIntentBits.Guilds]
+    });
+  }
 
-    async start(): Promise<void> {
-        await this.registerCommands();
+  async start(): Promise<void> {
+    await this.registerCommands();
 
-        this.client.on("ready", async () => {
-            const ch = await this.client.channels.fetch(this.cfg.channelId);
-            if (ch && ch.isTextBased()) this.channel = ch as TextChannel;
-            console.log(`[Discord] logged in as ${this.client.user?.tag}`);
-        });
+    this.client.on("interactionCreate", async (interaction) => {
+      if (interaction.isChatInputCommand()) {
+        await interaction.deferReply({ ephemeral: false });
+        await this.handleSlash(interaction);
+        return;
+      }
 
-        this.client.on("interactionCreate", async (interaction) => {
-            if (interaction.isChatInputCommand()) {
-                await this.handlers.onCommand(interaction);
-            } else if (interaction.isButton()) {
-                const [kind, planId] = interaction.customId.split(":");
-                if (kind === "approve") await this.handlers.onApprove(planId, interaction);
-                if (kind === "reject") await this.handlers.onReject(planId, interaction);
-            }
-        });
+      if (interaction.isButton()) {
+        await this.handleButton(interaction);
+      }
+    });
 
-        await this.client.login(this.cfg.token);
-    }
+    await this.client.login(this.cfg.token);
+    this.log.info("Discord bot logged in");
+  }
 
-    async postProposal(p: Proposal): Promise<void> {
-        if (!this.channel) throw new Error("Discord channel not ready");
+  private async registerCommands(): Promise<void> {
+    const commands = [
+      new SlashCommandBuilder()
+        .setName("agent_status")
+        .setDescription("Show repo agent status"),
 
-        await this.savePending(p);
+      new SlashCommandBuilder()
+        .setName("agent_run")
+        .setDescription("Run the repo agent")
+        .addStringOption((opt) =>
+          opt
+            .setName("mode")
+            .setDescription("Run mode")
+            .addChoices(
+              { name: "dry-run", value: "dry-run" },
+              { name: "plan", value: "plan" },
+              { name: "plan+verify", value: "plan+verify" }
+            )
+        ),
 
-        const approve = new ButtonBuilder()
-            .setCustomId(`approve:${p.planId}`)
-            .setLabel("Approve & Merge")
-            .setStyle(ButtonStyle.Success);
+      new SlashCommandBuilder()
+        .setName("agent_explain")
+        .setDescription("Explain the last agent proposal"),
 
-        const reject = new ButtonBuilder()
-            .setCustomId(`reject:${p.planId}`)
-            .setLabel("Reject")
-            .setStyle(ButtonStyle.Danger);
+      new SlashCommandBuilder()
+        .setName("agent_tokens")
+        .setDescription("Show exact LLM token usage")
+    ].map((c) => c.toJSON());
 
-        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(approve, reject);
+    const rest = new REST({ version: "10" }).setToken(this.cfg.token);
+    await rest.put(
+      Routes.applicationGuildCommands(this.cfg.clientId, this.cfg.guildId),
+      { body: commands }
+    );
+  }
 
-        const content =
-            `**Repo Agent Proposal**\n` +
-            `Plan: \`${p.planId}\`\n` +
-            `Branch: \`${p.branchName}\`\n` +
-            `Base: \`${p.baseRef}\` (HEAD before: \`${p.headBefore.slice(0, 8)}\`)\n\n` +
-            `**Summary**\n${p.summary}\n\n` +
-            `**Verification**\n${p.verificationSummary}\n\n` +
-            `**Diff (snippet)**\n\`\`\`diff\n${truncate(p.diffSnippet, 3500)}\n\`\`\``;
+  private async handleSlash(
+    interaction: ChatInputCommandInteraction
+  ): Promise<void> {
+    switch (interaction.commandName) {
+      case "agent_tokens": {
+        const ledger = await loadLedger("agent_artifacts");
 
-        await this.channel.send({ content, components: [row] });
-    }
-
-    async reply(interaction: ChatInputCommandInteraction, content: string): Promise<void> {
-        // If already replied, we must editReply; if not, reply then edit is fine.
-        if (interaction.deferred || interaction.replied) {
-            await interaction.editReply(content);
-        } else {
-            await interaction.reply(content);
-        }
-    }
-
-    async editButtonResponse(interaction: Interaction, content: string): Promise<void> {
-        if (interaction.isRepliable()) {
-            // buttons are interactions too; always use editReply
-            if (interaction.deferred || interaction.replied) await interaction.editReply(content);
-            else await interaction.reply(content);
-        }
-    }
-
-    async loadPending(planId: string): Promise<Proposal | null> {
-        const p = await pendingPath(this.cfg.artifactsDir);
-        try {
-            const raw = await fs.readFile(p, "utf8");
-            const list: Proposal[] = JSON.parse(raw);
-            return list.find((x) => x.planId === planId) ?? null;
-        } catch {
-            return null;
-        }
-    }
-
-    async clearPending(planId: string): Promise<void> {
-        const p = await pendingPath(this.cfg.artifactsDir);
-        let list: Proposal[] = [];
-        try {
-            list = JSON.parse(await fs.readFile(p, "utf8"));
-        } catch {
-            list = [];
-        }
-        const next = list.filter((x) => x.planId !== planId);
-        await fs.mkdir(path.dirname(p), { recursive: true });
-        await fs.writeFile(p, JSON.stringify(next, null, 2), "utf8");
-    }
-
-    private async savePending(proposal: Proposal): Promise<void> {
-        const p = await pendingPath(this.cfg.artifactsDir);
-        let list: Proposal[] = [];
-        try {
-            list = JSON.parse(await fs.readFile(p, "utf8"));
-        } catch {
-            list = [];
-        }
-        list = [proposal, ...list.filter((x) => x.planId !== proposal.planId)].slice(0, 30);
-        await fs.mkdir(path.dirname(p), { recursive: true });
-        await fs.writeFile(p, JSON.stringify(list, null, 2), "utf8");
-    }
-
-    private async registerCommands(): Promise<void> {
-        const commands = [
-            new SlashCommandBuilder()
-                .setName("agent_status")
-                .setDescription("Show agent status"),
-
-            new SlashCommandBuilder()
-                .setName("agent_run")
-                .setDescription("Run the repo agent")
-                .addStringOption((o) =>
-                    o
-                        .setName("mode")
-                        .setDescription("Run mode")
-                        .setRequired(false)
-                        .addChoices(
-                            { name: "dry-run", value: "dry-run" },
-                            { name: "plan", value: "plan" },
-                            { name: "plan+verify", value: "plan+verify" }
-                        )
-                )
-        ].map((c) => c.toJSON());
-
-        const rest = new REST({ version: "10" }).setToken(this.cfg.token);
-
-        await rest.put(
-            Routes.applicationGuildCommands(this.cfg.clientId, this.cfg.guildId),
-            { body: commands }
+        const maxCalls = Number(
+          process.env.AGENT_MAX_LLM_CALLS_PER_DAY ?? 50
         );
+
+        await interaction.editReply(
+          `**LLM Token Usage (Today)**\n\n` +
+            `• Calls: ${ledger.calls} / ${maxCalls}\n` +
+            `• Input tokens: ${ledger.tokens.input}\n` +
+            `• Output tokens: ${ledger.tokens.output}\n` +
+            `• Total tokens: ${ledger.tokens.total}\n\n` +
+            `• Avg tokens/call: ${
+              ledger.calls > 0
+                ? Math.round(ledger.tokens.total / ledger.calls)
+                : 0
+            }`
+        );
+        return;
+      }
+
+      case "agent_status": {
+        const s = this.agent.getStatus();
+        await interaction.editReply(
+          `**Repo Agent Status**\n\n` +
+            `• Busy: ${s.busy ? "yes" : "no"}\n` +
+            `• Pending proposal: ${
+              s.pendingProposal
+                ? `${s.pendingProposal.plan} (${s.pendingProposal.planId})`
+                : "no"
+            }\n` +
+            `• Planner: ${s.planner}\n` +
+            `• Write phase: DISABLED`
+        );
+        return;
+      }
+
+      case "agent_run": {
+        const mode =
+          (interaction.options.getString("mode") as AgentRunMode) ??
+          "dry-run";
+
+        await this.agent.trigger({
+          kind: "discord",
+          command: "agent_run",
+          mode
+        });
+
+        const proposal = this.agent.getLastProposal();
+        if (!proposal) {
+          await interaction.editReply("No proposal generated.");
+          return;
+        }
+
+        this.pendingProposal = proposal;
+
+        await interaction.editReply({
+          content: this.renderProposal(proposal),
+          components: [this.buildButtons()]
+        });
+        return;
+      }
+
+      case "agent_explain": {
+        await interaction.editReply(
+          this.agent.getLastSummary() ??
+            "No agent proposal has been generated yet."
+        );
+        return;
+      }
     }
-}
+  }
 
-async function pendingPath(artifactsDir: string): Promise<string> {
-    return path.join(artifactsDir, "pending.json");
-}
+  private async handleButton(interaction: Interaction): Promise<void> {
+    if (!interaction.isButton()) return;
 
-function truncate(s: string, max: number): string {
-    if (s.length <= max) return s;
-    return s.slice(0, max) + `\n...TRUNCATED (${s.length} chars total)`;
+    if (!this.pendingProposal) {
+      await interaction.reply({
+        content: "No pending proposal.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (interaction.customId === "agent_approve") {
+      await interaction.update({
+        content:
+          "✅ Proposal approved.\n(No merge executed — write phase disabled.)",
+        components: []
+      });
+      this.pendingProposal = null;
+      return;
+    }
+
+    if (interaction.customId === "agent_reject") {
+      await interaction.update({
+        content: "❌ Proposal rejected.",
+        components: []
+      });
+      this.pendingProposal = null;
+      return;
+    }
+  }
+
+  private buildButtons() {
+    return new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId("agent_approve")
+        .setLabel("Approve & Merge")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId("agent_reject")
+        .setLabel("Reject")
+        .setStyle(ButtonStyle.Danger)
+    );
+  }
+
+  private renderProposal(p: AgentProposal): string {
+    return (
+      `**Repo Agent Proposal**\n` +
+      `Plan: ${p.plan}\n` +
+      `Branch: ${p.branch}\n` +
+      `Base: ${p.base} (HEAD before: ${p.headBefore})\n\n` +
+      `**Summary**\n${p.summary}\n\n` +
+      `**Verification**\n${p.verification}\n\n` +
+      `**Diff (snippet)**\n${p.diffSnippet}`
+    );
+  }
 }
