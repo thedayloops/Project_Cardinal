@@ -24,9 +24,9 @@ async function main() {
   const config = loadConfig();
 
   const agent = new Agent(config);
-  const bot = new DiscordBot(agent, config.discord.token);
+  const bot = new DiscordBot(agent);
 
-  await bot.start();
+  await bot.start(config.discord.token);
 }
 
 main().catch((err) => {
