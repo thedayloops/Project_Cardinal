@@ -1,3 +1,5 @@
+// tools/repo-agent/src/core/Agent.ts
+
 import fs from "node:fs/promises";
 import path from "node:path";
 import simpleGit from "simple-git";
@@ -28,23 +30,26 @@ export class Agent {
       cfg.artifactsDir
     );
 
+    // Avoid unhandled promise rejection on startup
     fs.mkdir(this.artifactsAbsDir, { recursive: true }).catch(() => {});
   }
 
-  // --------------------------------------------------
-  // Active repo selection
-  // --------------------------------------------------
+  // -------------------------
+  // Repo routing
+  // -------------------------
   private resolveActiveRepo(mode: string) {
     if (mode === "self_improve") {
       return {
-        root: path.resolve(this.cfg.repoRoot), // tools/repo-agent
+        root: this.cfg.repoRoot,
         git: new GitService(this.cfg.repoRoot),
+        isSelfImprove: true,
       };
     }
 
     return {
-      root: path.resolve(this.cfg.targetRepoRoot), // src/
+      root: this.cfg.targetRepoRoot,
       git: new GitService(this.cfg.targetRepoRoot),
+      isSelfImprove: false,
     };
   }
 
@@ -74,9 +79,9 @@ export class Agent {
     this.pendingPlanId = null;
   }
 
-  // --------------------------------------------------
+  // -------------------------
   // PLAN PHASE
-  // --------------------------------------------------
+  // -------------------------
   async run(mode: string, reason: string | null) {
     const planId = `plan_${Date.now()}`;
     const active = this.resolveActiveRepo(mode);
@@ -114,19 +119,30 @@ export class Agent {
       filesPreview: ctx.files,
     })) as PatchPlan;
 
-    // --------------------------------------------------
-    // HARD SCOPE ENFORCEMENT (CORRECT + SIMPLE)
-    // --------------------------------------------------
+    // -------------------------
+    // HARD SCOPE ENFORCEMENT
+    // -------------------------
     for (const op of plan.ops) {
+      // Disallow absolute paths everywhere
       if (path.isAbsolute(op.file)) {
         throw new Error(`Absolute paths are not allowed: ${op.file}`);
       }
 
-      const resolved = path.resolve(active.root, op.file);
+      // Disallow traversal attempts
+      const normalized = path.normalize(op.file);
+      if (normalized.startsWith("..")) {
+        throw new Error(`Path traversal is not allowed: ${op.file}`);
+      }
 
-      if (!resolved.startsWith(active.root + path.sep)) {
+      // Prevent non-self-improve modes from touching repo-agent
+      if (!active.isSelfImprove && normalized.startsWith("src/")) {
+        // OK — target repo
+        continue;
+      }
+
+      if (!active.isSelfImprove && normalized.includes("repo-agent")) {
         throw new Error(
-          `Patch escapes active repo root (${mode}): ${op.file}`
+          `Non-self_improve modes may NOT modify repo-agent files (${op.file})`
         );
       }
     }
@@ -137,9 +153,9 @@ export class Agent {
     return { planId, patchPlan: plan };
   }
 
-  // --------------------------------------------------
+  // -------------------------
   // EXECUTION PHASE
-  // --------------------------------------------------
+  // -------------------------
   async executeApprovedPlan() {
     if (!this.pendingPlan || !this.pendingPlanId) {
       throw new Error("No pending plan.");
@@ -151,7 +167,7 @@ export class Agent {
     const branch = `agent/${this.pendingPlanId}`;
     const git = new GitService(active.root);
 
-    // Capture HEAD before branching so diffs are correct
+    // Capture HEAD before branch creation for correct diffs
     const headBefore = await git.getHeadSha();
 
     await git.createBranch(branch);
