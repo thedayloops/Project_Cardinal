@@ -13,6 +13,10 @@ import { loadLedger, type Ledger } from "../util/tokenLedger.js";
 import { resolveArtifactsDirAbs } from "../util/artifactsDir.js";
 import { PatchExecutor } from "./PatchExecutor.js";
 
+function toPosix(p: string): string {
+  return path.posix.normalize(p.replace(/\\/g, "/"));
+}
+
 export class Agent {
   private cfg: AgentConfig;
   private planner: ReturnType<typeof createPlanner>;
@@ -30,18 +34,18 @@ export class Agent {
       cfg.artifactsDir
     );
 
-    // Avoid unhandled promise rejection on startup
     fs.mkdir(this.artifactsAbsDir, { recursive: true }).catch(() => {});
   }
 
-  // -------------------------
-  // Repo routing
-  // -------------------------
+  // --------------------------------------------------
+  // Repo routing (single source of truth)
+  // --------------------------------------------------
   private resolveActiveRepo(mode: string) {
     if (mode === "self_improve") {
+      const repoAgentRoot = path.join(this.cfg.repoRoot, "tools/repo-agent");
       return {
-        root: this.cfg.repoRoot,
-        git: new GitService(this.cfg.repoRoot),
+        root: repoAgentRoot,
+        git: new GitService(repoAgentRoot),
         isSelfImprove: true,
       };
     }
@@ -57,7 +61,7 @@ export class Agent {
     return {
       online: true,
       pending_plan: Boolean(this.pendingPlan),
-      repo_agent_root: this.cfg.repoRoot,
+      project_root: this.cfg.repoRoot,
       target_repo_root: this.cfg.targetRepoRoot,
     };
   }
@@ -79,9 +83,9 @@ export class Agent {
     this.pendingPlanId = null;
   }
 
-  // -------------------------
+  // --------------------------------------------------
   // PLAN PHASE
-  // -------------------------
+  // --------------------------------------------------
   async run(mode: string, reason: string | null) {
     const planId = `plan_${Date.now()}`;
     const active = this.resolveActiveRepo(mode);
@@ -119,31 +123,22 @@ export class Agent {
       filesPreview: ctx.files,
     })) as PatchPlan;
 
-    // -------------------------
-    // HARD SCOPE ENFORCEMENT
-    // -------------------------
+    // --------------------------------------------------
+    // HARD SCOPE + PATH SANITY (FINAL)
+    // --------------------------------------------------
     for (const op of plan.ops) {
-      // Disallow absolute paths everywhere
       if (path.isAbsolute(op.file)) {
         throw new Error(`Absolute paths are not allowed: ${op.file}`);
       }
 
-      // Disallow traversal attempts
-      const normalized = path.normalize(op.file);
-      if (normalized.startsWith("..")) {
+      const normalized = toPosix(op.file);
+
+      if (
+        normalized === ".." ||
+        normalized.startsWith("../") ||
+        normalized.includes("/../")
+      ) {
         throw new Error(`Path traversal is not allowed: ${op.file}`);
-      }
-
-      // Prevent non-self-improve modes from touching repo-agent
-      if (!active.isSelfImprove && normalized.startsWith("src/")) {
-        // OK — target repo
-        continue;
-      }
-
-      if (!active.isSelfImprove && normalized.includes("repo-agent")) {
-        throw new Error(
-          `Non-self_improve modes may NOT modify repo-agent files (${op.file})`
-        );
       }
     }
 
@@ -153,9 +148,9 @@ export class Agent {
     return { planId, patchPlan: plan };
   }
 
-  // -------------------------
+  // --------------------------------------------------
   // EXECUTION PHASE
-  // -------------------------
+  // --------------------------------------------------
   async executeApprovedPlan() {
     if (!this.pendingPlan || !this.pendingPlanId) {
       throw new Error("No pending plan.");
@@ -167,7 +162,6 @@ export class Agent {
     const branch = `agent/${this.pendingPlanId}`;
     const git = new GitService(active.root);
 
-    // Capture HEAD before branch creation for correct diffs
     const headBefore = await git.getHeadSha();
 
     await git.createBranch(branch);

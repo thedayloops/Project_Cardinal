@@ -1,12 +1,16 @@
+// tools/repo-agent/src/core/Guardrails.ts
+
 import path from "node:path";
 import { PatchPlan, PatchOp } from "../schemas/PatchPlan.js";
 
+function toPosix(p: string): string {
+  return path.posix.normalize(p.replace(/\\/g, "/"));
+}
+
 export type GuardrailConfig = {
   repoRoot: string;
-
   lockedPathPrefixes: string[];
   deniedPathPrefixes: string[];
-
   maxOps: number;
   maxTotalPatchBytes: number;
 };
@@ -36,17 +40,18 @@ export class Guardrails {
   }
 
   private validateOp(op: PatchOp): void {
-    const normalized = path.normalize(op.file);
+    const normalized = toPosix(op.file);
 
-    // deny/lock prefixes are relative-path checks (repo-root sandbox is enforced elsewhere)
     for (const denied of this.cfg.deniedPathPrefixes) {
-      if (normalized.startsWith(denied)) {
+      const d = toPosix(denied);
+      if (d && normalized.startsWith(d)) {
         throw new Error(`Patch targets denied path: ${op.file}`);
       }
     }
 
     for (const locked of this.cfg.lockedPathPrefixes) {
-      if (normalized.startsWith(locked)) {
+      const l = toPosix(locked);
+      if (l && normalized.startsWith(l)) {
         throw new Error(`Patch targets locked path: ${op.file}`);
       }
     }
@@ -55,10 +60,10 @@ export class Guardrails {
       throw new Error(`All ops must be reversible (op ${op.id})`);
     }
 
-    // Basic line sanity (even for file ops we keep start_line=1)
     if (op.start_line < 1) {
       throw new Error(`start_line must be >= 1 (op ${op.id})`);
     }
+
     if (op.end_line !== null && op.end_line < op.start_line) {
       throw new Error(`end_line must be >= start_line (op ${op.id})`);
     }
@@ -86,15 +91,9 @@ export class Guardrails {
         return;
 
       case "create_file":
-        if (op.end_line !== null) {
-          throw new Error(`create_file must have end_line=null (op ${op.id})`);
-        }
-        // allow any patch content (may be empty but usually not)
-        return;
-
       case "update_file":
         if (op.end_line !== null) {
-          throw new Error(`update_file must have end_line=null (op ${op.id})`);
+          throw new Error(`${op.type} must have end_line=null (op ${op.id})`);
         }
         return;
 
