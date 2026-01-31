@@ -1,98 +1,148 @@
 // tools/repo-agent/src/core/Agent.ts
-import simpleGit, { SimpleGit } from "simple-git";
-
+import simpleGit from "simple-git";
 import type { AgentConfig } from "./Config.js";
-import { GitService } from "./GitService.js";
-import { ContextBuilder, type Trigger } from "./ContextBuilder.js";
+import { ContextBuilder } from "./ContextBuilder.js";
 import { createPlanner } from "./PlannerFactory.js";
-import type { PlannerInput } from "./PlannerFactory.js";
-import type { PatchPlan } from "../schemas/PatchPlan.js";
-
-export type AgentRunResult = {
-  planId: string;
-  patchPlan: PatchPlan;
-};
+import {
+  loadLedger,
+  recordTokenCall,
+  type Ledger,
+} from "../util/tokenLedger.js";
 
 export class Agent {
-  private gitService: GitService;
-  private git: SimpleGit;
-  private pendingPlan: PatchPlan | null = null;
+  private cfg: AgentConfig;
+  private planner;
+  private lastPlan: {
+    planId: string;
+    patchPlan: any;
+  } | null = null;
 
-  constructor(private readonly config: AgentConfig) {
-    this.gitService = new GitService(config.repoRoot);
-    this.git = simpleGit(config.repoRoot, { binary: "git" });
+  constructor(cfg: AgentConfig) {
+    this.cfg = cfg;
+    this.planner = createPlanner(cfg);
   }
 
+  // ─────────────────────────────────────────────
+  // Agent status (/agent_status)
+  // ─────────────────────────────────────────────
   async getStatus() {
+    const git = simpleGit(this.cfg.repoRoot);
+
+    let branch = "unknown";
+    let head = "unknown";
+    let git_status = "unavailable";
+
+    try {
+      branch = (await git.revparse(["--abbrev-ref", "HEAD"])).trim();
+      head = (await git.revparse(["HEAD"])).trim();
+
+      const s = await git.status();
+      git_status = `ahead=${s.ahead} behind=${s.behind} modified=${s.modified.length} created=${s.created.length} deleted=${s.deleted.length}`;
+    } catch {
+      // git unavailable → safe fallback
+    }
+
     return {
       online: true,
-      llm_enabled: this.config.enableLLM,
-      planner: this.config.enableLLM ? "openai" : "stub",
-      repoRoot: this.config.repoRoot,
-      branch: await this.gitService.getCurrentBranch(),
-      head: await this.gitService.getHeadSha(),
-      git_status: await this.gitService.statusSummary(),
-      pending_plan: Boolean(this.pendingPlan),
+      llm_enabled: this.cfg.enableLLM,
+      planner: this.cfg.enableLLM ? "openai" : "stub",
+      repoRoot: this.cfg.repoRoot,
+      branch,
+      head,
+      git_status,
+      pending_plan: !!this.lastPlan,
     };
   }
 
-  async run(mode: string, reason: string | null): Promise<AgentRunResult> {
-    // Always produce a planId so Discord never shows undefined
-    const planId = `plan_${Date.now()}`;
+  // ─────────────────────────────────────────────
+  // Token stats (/agent_tokens)
+  // ─────────────────────────────────────────────
+  async getTokenStats(): Promise<Ledger> {
+    return loadLedger(this.cfg.artifactsDir);
+  }
 
-    // Build context using the real ContextBuilder signature
-    const trigger: Trigger = {
+  // ─────────────────────────────────────────────
+  // Last plan memory (/agent_explain)
+  // ─────────────────────────────────────────────
+  getLastPlan() {
+    return this.lastPlan;
+  }
+
+  clearPendingPlan() {
+    this.lastPlan = null;
+  }
+
+  // ─────────────────────────────────────────────
+  // Main execution (/agent_run)
+  // ─────────────────────────────────────────────
+  async run(mode: string, reason: string | null) {
+    if (!this.cfg.enableLLM) {
+      return {
+        planId: undefined,
+        patchPlan: undefined,
+        reason: "planning is disabled",
+      };
+    }
+
+    const git = simpleGit(this.cfg.repoRoot);
+
+    const ctxBuilder = new ContextBuilder(
+      this.cfg.repoRoot,
+      git,
+      { maxFileBytes: this.cfg.guardrails.maxFileBytes }
+    );
+
+    const ctx = await ctxBuilder.buildMinimal({
       kind: "discord",
-      command: "/agent_run",
+      command: "agent_run",
       mode,
-    };
-
-    const builder = new ContextBuilder(this.config.repoRoot, this.git, {
-      maxFileBytes: this.config.guardrails.maxFileBytes,
     });
 
-    const ctx = await builder.buildMinimal(trigger);
-
-    // Adapt AgentContext -> PlannerInput (exact required shape)
-    const filesPreview = ctx.files.map((f) => ({
-      path: f.path.replaceAll("\\", "/"),
-      content: f.content,
-    }));
-
-    const scope = ctx.scope ?? {
-      files: filesPreview.map((f) => f.path),
-      total_ops: 0,
-      estimated_bytes_changed: 0,
-    };
-
-    const input: PlannerInput = {
+    const plannerInput = {
       repo: {
         root: ctx.repoRoot,
         headSha: ctx.headSha,
         branch: ctx.branch,
       },
-      scope,
       mode,
       reason: reason ?? undefined,
-      filesPreview,
+      scope: {
+        files: ctx.files.map((f) => f.path),
+        total_ops: 0,
+        estimated_bytes_changed: 0,
+      },
+      filesPreview: ctx.files,
     };
 
-    // Planner selection is already handled by createPlanner(config)
-    // If enableLLM=false => StubPlanner still returns a valid PatchPlan (noop)
-    const planner = createPlanner(this.config);
+    const startedAt = new Date().toISOString();
+    const patchPlan = await this.planner.planPatch(plannerInput);
 
-    const patchPlan = (await planner.planPatch(input)) as PatchPlan;
+    const planId = `plan_${Date.now()}`;
 
-    this.pendingPlan = patchPlan;
+    this.lastPlan = {
+      planId,
+      patchPlan,
+    };
 
-    return { planId, patchPlan };
-  }
+    // Best-effort token accounting
+    try {
+      const usage = (patchPlan as any)?.usage;
+      if (usage) {
+        await recordTokenCall(this.cfg.artifactsDir, {
+          at: startedAt,
+          model: this.cfg.openai.model,
+          inputTokens: usage.input_tokens ?? 0,
+          outputTokens: usage.output_tokens ?? 0,
+          totalTokens: usage.total_tokens ?? 0,
+        });
+      }
+    } catch {
+      // ledger failure must never break agent flow
+    }
 
-  clearPendingPlan() {
-    this.pendingPlan = null;
-  }
-
-  getPendingPlan() {
-    return this.pendingPlan;
+    return {
+      planId,
+      patchPlan,
+    };
   }
 }
