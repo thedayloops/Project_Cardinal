@@ -1,6 +1,5 @@
 // tools/repo-agent/src/core/Agent.ts
 import fs from "node:fs/promises";
-import path from "node:path";
 import simpleGit from "simple-git";
 
 import { ContextBuilder, type Trigger } from "./ContextBuilder.js";
@@ -10,6 +9,7 @@ import { GitService } from "./GitService.js";
 import { Guardrails } from "./Guardrails.js";
 import type { PatchPlan } from "../schemas/PatchPlan.js";
 import { loadLedger, type Ledger } from "../util/tokenLedger.js";
+import { resolveArtifactsDirAbs } from "../util/artifactsDir.js";
 import { PatchExecutor } from "./PatchExecutor.js";
 
 export type AgentProposal = {
@@ -28,8 +28,29 @@ export type StatusResult = {
   pending_plan: boolean;
 };
 
-function estimateTokensFromChars(chars: number): number {
-  return Math.ceil(chars / 4);
+function normalizePlanForGuardrails(plan: PatchPlan): PatchPlan {
+  // Hardening: ensure planner outputs always satisfy Guardrails' minimum shape.
+  // This is intentionally conservative and only normalizes known footguns.
+  for (const op of plan.ops ?? []) {
+    if ((op as any).start_line == null || (op as any).start_line < 1) {
+      (op as any).start_line = 1;
+    }
+    if (op.type === "create_file" || op.type === "update_file") {
+      (op as any).end_line = null;
+    }
+    // Normalize Windows paths to forward slashes for consistency.
+    if (typeof (op as any).file === "string") {
+      (op as any).file = (op as any).file.replace(/\\/g, "/");
+    }
+  }
+  // Keep scope in sync (avoid misleading summaries)
+  if (!plan.scope.total_ops || plan.scope.total_ops <= 0) {
+    plan.scope.total_ops = plan.ops?.length ?? 0;
+  }
+  if ((plan.scope.files?.length ?? 0) === 0 && (plan.ops?.length ?? 0) > 0) {
+    plan.scope.files = Array.from(new Set((plan.ops ?? []).map((o: any) => o.file))).filter(Boolean);
+  }
+  return plan;
 }
 
 export class Agent {
@@ -39,7 +60,6 @@ export class Agent {
   private guardrails: Guardrails;
 
   private artifactsAbsDir: string;
-
   private pendingPlan: PatchPlan | null = null;
   private pendingPlanId: string | null = null;
 
@@ -48,9 +68,7 @@ export class Agent {
     this.gitSvc = new GitService(cfg.repoRoot);
     this.planner = createPlanner(cfg);
 
-    this.artifactsAbsDir = path.isAbsolute(cfg.artifactsDir)
-      ? cfg.artifactsDir
-      : path.resolve(cfg.repoRoot, cfg.artifactsDir);
+    this.artifactsAbsDir = resolveArtifactsDirAbs(cfg.repoRoot, cfg.artifactsDir);
 
     this.guardrails = new Guardrails({
       repoRoot: cfg.repoRoot,
@@ -60,10 +78,10 @@ export class Agent {
       maxTotalPatchBytes: cfg.guardrails.maxTotalWriteBytes,
     });
 
-    void fs.mkdir(this.artifactsAbsDir, { recursive: true });
+    fs.mkdir(this.artifactsAbsDir, { recursive: true }).catch(() => {});
   }
 
-  async getStatus(): Promise<StatusResult> {
+  async getStatus() {
     return {
       online: true,
       llm_enabled: this.cfg.enableLLM,
@@ -84,6 +102,10 @@ export class Agent {
     return this.pendingPlan;
   }
 
+  getPendingPlanId(): string | null {
+    return this.pendingPlanId;
+  }
+
   clearPendingPlan() {
     this.pendingPlan = null;
     this.pendingPlanId = null;
@@ -98,167 +120,84 @@ export class Agent {
       mode,
     };
 
-    if (!this.cfg.enableLLM) {
-      const noop: PatchPlan = {
-        meta: { goal: "noop", rationale: "LLM disabled", confidence: 0 },
-        scope: { files: [], total_ops: 0, estimated_bytes_changed: 0 },
-        expected_effects: [],
-        ops: [],
-        verification: { steps: [], success_criteria: [] },
-      };
-      this.pendingPlan = noop;
-      this.pendingPlanId = planId;
-      return { planId, patchPlan: noop };
-    }
-
     const git = simpleGit(this.cfg.repoRoot);
+    const ctxBuilder = new ContextBuilder(this.cfg.repoRoot, git, {
+      maxFileBytes: this.cfg.guardrails.maxFileBytes,
+      maxFiles: this.cfg.planner.maxFiles,
+      maxCharsPerFile: this.cfg.planner.maxCharsPerFile,
+      maxTotalChars: this.cfg.planner.maxTotalChars,
+    });
 
-    const buildCtx = async (maxFiles: number) => {
-      const ctxBuilder = new ContextBuilder(this.cfg.repoRoot, git, {
-        maxFileBytes: this.cfg.guardrails.maxFileBytes,
-        maxFiles,
-        maxCharsPerFile: this.cfg.planner.maxCharsPerFile,
-        maxTotalChars: this.cfg.planner.maxTotalChars,
-      });
-      return ctxBuilder.buildMinimal(trigger);
-    };
+    const ctx = await ctxBuilder.buildMinimal(trigger);
 
-    const ctx1 = await buildCtx(this.cfg.planner.maxFiles);
-
-    const trimToBudget = (files: { path: string; content: string }[]) => {
-      let out = [...files];
-      while (out.length > 1) {
-        const payloadStr = JSON.stringify({
-          repo: { root: this.cfg.repoRoot, headSha: ctx1.headSha, branch: ctx1.branch },
-          mode,
-          reason: reason ?? undefined,
-          scope: { files: out.map((f) => f.path), total_ops: 0, estimated_bytes_changed: 0 },
-          filesPreview: out,
-        });
-        const est = estimateTokensFromChars(payloadStr.length + 800);
-        if (est <= this.cfg.planner.maxInputTokens) return out;
-        out.pop();
-      }
-
-      const payloadStr = JSON.stringify({
-        repo: { root: this.cfg.repoRoot, headSha: ctx1.headSha, branch: ctx1.branch },
-        mode,
-        reason: reason ?? undefined,
-        scope: { files: out.map((f) => f.path), total_ops: 0, estimated_bytes_changed: 0 },
-        filesPreview: out,
-      });
-
-      const est = estimateTokensFromChars(payloadStr.length + 800);
-      if (est > this.cfg.planner.maxInputTokens) {
-        throw new Error(
-          `Planner input budget exceeded even after trimming (est ${est} > ${this.cfg.planner.maxInputTokens}). ` +
-            `Reduce AGENT_PLANNER_MAX_CHARS_PER_FILE or AGENT_PLANNER_MAX_TOTAL_CHARS.`
-        );
-      }
-      return out;
-    };
-
-    // pass 1
-    const pass1Files = trimToBudget(ctx1.files);
-
-    const plannerInput1 = {
-      repo: { root: this.cfg.repoRoot, headSha: ctx1.headSha, branch: ctx1.branch },
-      scope: { files: pass1Files.map((f) => f.path), total_ops: 0, estimated_bytes_changed: 0 },
-      reason: reason ?? undefined,
+    const plan = (await this.planner.planPatch({
+      repo: { root: this.cfg.repoRoot, headSha: ctx.headSha, branch: ctx.branch },
+      scope: {
+        files: ctx.files.map((f) => f.path),
+        total_ops: 0,
+        estimated_bytes_changed: 0,
+      },
       mode,
-      filesPreview: pass1Files,
-    };
+      reason: reason ?? undefined,
+      filesPreview: ctx.files,
+    } as any)) as PatchPlan;
 
-    const plan1 = (await this.planner.planPatch(plannerInput1 as any)) as PatchPlan;
-    this.guardrails.validatePatchPlan(plan1);
+    normalizePlanForGuardrails(plan);
 
-    const wantsSecond =
-      ["plan", "verify", "deep"].includes(mode) &&
-      (plan1.ops?.length ?? 0) === 0 &&
-      this.cfg.planner.secondPassMaxFiles > this.cfg.planner.maxFiles;
-
-    if (wantsSecond) {
-      try {
-        const ctx2 = await buildCtx(this.cfg.planner.secondPassMaxFiles);
-        const pass2Files = trimToBudget(ctx2.files);
-
-        const plannerInput2 = {
-          repo: { root: this.cfg.repoRoot, headSha: ctx2.headSha, branch: ctx2.branch },
-          scope: { files: pass2Files.map((f) => f.path), total_ops: 0, estimated_bytes_changed: 0 },
-          reason: reason ?? undefined,
-          mode,
-          filesPreview: pass2Files,
-        };
-
-        const plan2 = (await this.planner.planPatch(plannerInput2 as any)) as PatchPlan;
-        this.guardrails.validatePatchPlan(plan2);
-
-        if (
-          (plan2.ops?.length ?? 0) > 0 ||
-          (plan2.meta?.confidence ?? 0) >= (plan1.meta?.confidence ?? 0)
-        ) {
-          this.pendingPlan = plan2;
-          this.pendingPlanId = planId;
-          return { planId, patchPlan: plan2 };
-        }
-      } catch {
-        // ignore; keep plan1
-      }
+    // Confidence gate for self-improvement
+    if (mode === "self_improve" && (plan.meta?.confidence ?? 0) < 0.6) {
+      throw new Error("Self-improvement confidence too low.");
     }
 
-    this.pendingPlan = plan1;
+    this.guardrails.validatePatchPlan(plan);
+    this.pendingPlan = plan;
     this.pendingPlanId = planId;
-    return { planId, patchPlan: plan1 };
+
+    return { planId, patchPlan: plan };
   }
 
-  /**
-   * Executes the currently pending plan on a NEW branch: agent/<planId>.
-   * Always validates guardrails before touching disk.
-   */
-  async executeApprovedPlan(): Promise<{
-    planId: string;
-    branch: string;
-    commit: string;
-    filesChanged: string;
-    diffSnippet: string;
-    diffFull: string;
-  }> {
+  async executeApprovedPlan() {
     if (!this.pendingPlan || !this.pendingPlanId) {
       throw new Error("No pending plan to execute.");
     }
 
-    // defense-in-depth: validate again
     this.guardrails.validatePatchPlan(this.pendingPlan);
 
     const planId = this.pendingPlanId;
-    const baseRef = "HEAD";
     const branchName = `agent/${planId}`;
+    const baseRef = "HEAD";
 
-    // Create branch off current HEAD
     await this.gitSvc.createBranch(branchName);
 
-    // Apply patch ops
     const executor = new PatchExecutor({ repoRoot: this.cfg.repoRoot });
     await executor.applyAll(this.pendingPlan.ops);
 
-    // Commit
-    const goal = this.pendingPlan.meta?.goal ?? "apply patch";
-    const commit = await this.gitSvc.addAllAndCommit(`agent: ${goal} (${planId})`);
+    // 🔒 ENFORCE NON-EMPTY DIFF
+    const diffNames = await this.gitSvc.diffNameStatus(baseRef);
+    if (!diffNames.trim()) {
+      throw new Error(
+        "Patch execution produced no file changes. Commit aborted."
+      );
+    }
 
-    // Diff summary
-    const filesChanged = await this.gitSvc.diffNameStatus(baseRef);
+    const goal = this.pendingPlan.meta?.goal ?? "apply patch";
+    const commit = await this.gitSvc.addAllAndCommit(
+      `agent: ${goal} (${planId})`
+    );
+
     const diffFull = await this.gitSvc.diffUnified(baseRef, 400_000);
     const diffSnippet =
-      diffFull.length > 1800 ? diffFull.slice(0, 1800) + "\n...TRUNCATED..." : diffFull;
+      diffFull.length > 1800
+        ? diffFull.slice(0, 1800) + "\n…TRUNCATED…"
+        : diffFull;
 
-    // Clear pending plan once committed
     this.clearPendingPlan();
 
     return {
       planId,
       branch: branchName,
       commit,
-      filesChanged: filesChanged.trim(),
+      filesChanged: diffNames.trim(),
       diffSnippet,
       diffFull,
     };
