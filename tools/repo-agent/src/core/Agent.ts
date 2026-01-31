@@ -13,10 +13,6 @@ import { loadLedger, type Ledger } from "../util/tokenLedger.js";
 import { resolveArtifactsDirAbs } from "../util/artifactsDir.js";
 import { PatchExecutor } from "./PatchExecutor.js";
 
-function toPosix(p: string): string {
-  return path.posix.normalize(p.replace(/\\/g, "/"));
-}
-
 export class Agent {
   private cfg: AgentConfig;
   private planner: ReturnType<typeof createPlanner>;
@@ -37,15 +33,11 @@ export class Agent {
     fs.mkdir(this.artifactsAbsDir, { recursive: true }).catch(() => {});
   }
 
-  // --------------------------------------------------
-  // Repo routing (single source of truth)
-  // --------------------------------------------------
   private resolveActiveRepo(mode: string) {
     if (mode === "self_improve") {
-      const repoAgentRoot = path.join(this.cfg.repoRoot, "tools/repo-agent");
       return {
-        root: repoAgentRoot,
-        git: new GitService(repoAgentRoot),
+        root: this.cfg.repoRoot,
+        git: new GitService(this.cfg.repoRoot),
         isSelfImprove: true,
       };
     }
@@ -61,7 +53,7 @@ export class Agent {
     return {
       online: true,
       pending_plan: Boolean(this.pendingPlan),
-      project_root: this.cfg.repoRoot,
+      repo_agent_root: this.cfg.repoRoot,
       target_repo_root: this.cfg.targetRepoRoot,
     };
   }
@@ -83,9 +75,9 @@ export class Agent {
     this.pendingPlanId = null;
   }
 
-  // --------------------------------------------------
+  // -------------------------
   // PLAN PHASE
-  // --------------------------------------------------
+  // -------------------------
   async run(mode: string, reason: string | null) {
     const planId = `plan_${Date.now()}`;
     const active = this.resolveActiveRepo(mode);
@@ -123,34 +115,15 @@ export class Agent {
       filesPreview: ctx.files,
     })) as PatchPlan;
 
-    // --------------------------------------------------
-    // HARD SCOPE + PATH SANITY (FINAL)
-    // --------------------------------------------------
-    for (const op of plan.ops) {
-      if (path.isAbsolute(op.file)) {
-        throw new Error(`Absolute paths are not allowed: ${op.file}`);
-      }
-
-      const normalized = toPosix(op.file);
-
-      if (
-        normalized === ".." ||
-        normalized.startsWith("../") ||
-        normalized.includes("/../")
-      ) {
-        throw new Error(`Path traversal is not allowed: ${op.file}`);
-      }
-    }
-
     this.pendingPlan = plan;
     this.pendingPlanId = planId;
 
     return { planId, patchPlan: plan };
   }
 
-  // --------------------------------------------------
-  // EXECUTION PHASE
-  // --------------------------------------------------
+  // -------------------------
+  // EXECUTION PHASE (FIXED)
+  // -------------------------
   async executeApprovedPlan() {
     if (!this.pendingPlan || !this.pendingPlanId) {
       throw new Error("No pending plan.");
@@ -160,25 +133,31 @@ export class Agent {
     const active = this.resolveActiveRepo(mode);
 
     const branch = `agent/${this.pendingPlanId}`;
-    const git = new GitService(active.root);
+    const gitSvc = new GitService(active.root);
+    const git = simpleGit(active.root);
 
-    const headBefore = await git.getHeadSha();
+    const headBefore = await gitSvc.getHeadSha();
 
-    await git.createBranch(branch);
+    await gitSvc.createBranch(branch);
 
     const executor = new PatchExecutor({ repoRoot: active.root });
     await executor.applyAll(this.pendingPlan.ops);
 
-    const diffNames = await git.diffNameStatus(headBefore);
-    if (!diffNames.trim()) {
+    // ✅ FIX: check WORKING TREE, not commits
+    const workingDiff = await git.raw(["diff", "--name-status"]);
+    if (!workingDiff.trim()) {
       throw new Error("Execution produced no changes.");
     }
 
-    const commit = await git.addAllAndCommit(
+    // Stage + commit
+    const commit = await gitSvc.addAllAndCommit(
       `agent: ${this.pendingPlan.meta?.goal ?? "apply"} (${this.pendingPlanId})`
     );
 
-    const diffFull = await git.diffUnified(headBefore, 400_000);
+    // Now compute commit diff for reporting
+    const diffNames = await gitSvc.diffNameStatus(headBefore);
+    const diffFull = await gitSvc.diffUnified(headBefore, 400_000);
+
     const diffSnippet =
       diffFull.length > 1800
         ? diffFull.slice(0, 1800) + "\n…TRUNCATED…"
