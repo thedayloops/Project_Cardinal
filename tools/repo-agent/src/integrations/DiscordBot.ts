@@ -1,5 +1,3 @@
-// tools/repo-agent/src/integrations/DiscordBot.ts
-
 import {
   Client,
   GatewayIntentBits,
@@ -15,16 +13,16 @@ import { Agent } from "../core/Agent.js";
 import { clipText, formatNameStatusList, toCodeBlock } from "../util/discordText.js";
 import { makeArtifactFileName } from "../util/artifactsDir.js";
 
-const DISCORD_MAX_CONTENT = 2000;
-// Keep some headroom for safety (code fences, extra lines, etc.)
 const SAFE_MAX_CONTENT = 1900;
 
-function asJsonAttachment(name: string, obj: unknown): AttachmentBuilder {
-  const json = JSON.stringify(obj, null, 2);
-  return new AttachmentBuilder(Buffer.from(json, "utf8"), { name });
+function jsonAttachment(name: string, obj: unknown) {
+  return new AttachmentBuilder(
+    Buffer.from(JSON.stringify(obj, null, 2), "utf8"),
+    { name }
+  );
 }
 
-function asTextAttachment(name: string, text: string): AttachmentBuilder {
+function textAttachment(name: string, text: string) {
   return new AttachmentBuilder(Buffer.from(text ?? "", "utf8"), { name });
 }
 
@@ -34,97 +32,87 @@ export class DiscordBot {
 
   constructor(agent: Agent) {
     this.agent = agent;
+    this.client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-    this.client = new Client({
-      intents: [GatewayIntentBits.Guilds],
-    });
-
-    this.client.on("interactionCreate", (interaction) => {
-      this.onInteraction(interaction).catch(console.error);
-    });
+    this.client.on("interactionCreate", (i) =>
+      this.onInteraction(i).catch(console.error)
+    );
   }
 
   async start(token: string) {
     await this.client.login(token);
-    console.log("[discord] bot online");
   }
 
-  // -----------------------------
-  // Interaction router
-  // -----------------------------
   private async onInteraction(interaction: Interaction) {
     if (interaction.isChatInputCommand()) {
       await this.handleSlash(interaction);
       return;
     }
-
     if (interaction.isButton()) {
       await this.handleButton(interaction);
       return;
     }
   }
 
-  // -----------------------------
-  // Slash commands
-  // -----------------------------
   private async handleSlash(interaction: ChatInputCommandInteraction) {
-    if (interaction.commandName === "agent_status") {
-      const status = await this.agent.getStatus();
-      await interaction.reply({
-        content: JSON.stringify(status, null, 2),
-        ephemeral: true,
-      });
-      return;
-    }
-
-    if (interaction.commandName === "agent_tokens") {
-      const ledger = await this.agent.getTokenStats();
-      await interaction.reply({
-        content: JSON.stringify(ledger, null, 2),
-        ephemeral: true,
-      });
-      return;
-    }
-
     if (interaction.commandName === "agent_run") {
       const mode = interaction.options.getString("mode", true);
       const reason = interaction.options.getString("reason");
 
-      await interaction.reply("Running agent...");
+      await interaction.reply("Running agent…");
 
       try {
         const proposal = await this.agent.run(mode, reason ?? null);
         const plan = proposal.patchPlan;
 
-        // Attach full plan JSON so we never hit the 2000-char limit.
-        const planFileName = makeArtifactFileName("plan", proposal.planId, "json");
-        const planAttachment = asJsonAttachment(planFileName, plan);
+        const planFile = makeArtifactFileName("plan", proposal.planId, "json");
 
-        const summaryLines = [
-          "Repo Agent Proposal",
-          "PlanId: " + proposal.planId,
-          "Mode: " + mode,
-          "Goal: " + (plan.meta?.goal ?? "(none)"),
-          "Confidence: " + String(plan.meta?.confidence ?? 0),
-          "Files: " + String(plan.scope?.files?.length ?? 0),
-          "Ops: " + String(plan.scope?.total_ops ?? plan.ops?.length ?? 0),
-          "Estimated bytes: " + String(plan.scope?.estimated_bytes_changed ?? 0),
-          "",
-          "Preview:",
-          clipText(JSON.stringify(plan, null, 2), 800),
-          "",
-          "Full plan attached as: " + planFileName,
-        ];
+        const warning =
+          mode === "self_improve"
+            ? [
+                "⚠️ **SELF-IMPROVE MODE**",
+                "",
+                "The agent is proposing changes to **its own code**:",
+                "`tools/repo-agent/**`",
+                "",
+                "Rules still apply:",
+                "- No commands removed",
+                "- No auto-execution",
+                "- Requires explicit approval",
+                "",
+                "Review carefully before approving.",
+                "",
+              ].join("\n")
+            : "";
 
-        const content = clipText(summaryLines.join("\n"), SAFE_MAX_CONTENT);
+        const body = clipText(
+          [
+            warning,
+            "Repo Agent Proposal",
+            `PlanId: ${proposal.planId}`,
+            `Mode: ${mode}`,
+            `Goal: ${plan.meta?.goal ?? "(none)"}`,
+            `Confidence: ${plan.meta?.confidence ?? 0}`,
+            `Files: ${plan.scope?.files?.length ?? 0}`,
+            `Ops: ${plan.ops?.length ?? 0}`,
+            "",
+            "Preview:",
+            clipText(JSON.stringify(plan, null, 2), 800),
+            "",
+            `Full plan attached: ${planFile}`,
+          ].join("\n"),
+          SAFE_MAX_CONTENT
+        );
 
         await interaction.editReply({
-          content,
+          content: body,
           components: [this.buildButtons()],
-          files: [planAttachment],
+          files: [jsonAttachment(planFile, plan)],
         });
       } catch (err: any) {
-        await interaction.editReply("Agent run failed:\n" + (err?.message ?? String(err)));
+        await interaction.editReply(
+          "Agent failed:\n" + (err?.message ?? String(err))
+        );
       }
       return;
     }
@@ -134,130 +122,102 @@ export class DiscordBot {
       const planId = this.agent.getPendingPlanId() ?? "unknown";
 
       if (!plan) {
-        await interaction.reply({
-          content: "No plan to explain.",
-          ephemeral: true,
-        });
+        await interaction.reply({ content: "No plan available.", ephemeral: true });
         return;
       }
 
-      const fileName = makeArtifactFileName("plan", planId, "json");
-      const attachment = asJsonAttachment(fileName, plan);
+      const file = makeArtifactFileName("plan", planId, "json");
 
-      const preview = clipText(JSON.stringify(plan, null, 2), 1200);
-      const content = clipText(
-        ["Repo Agent Plan", "PlanId: " + planId, "", "Preview:", preview, "", "Full plan attached as: " + fileName].join(
-          "\n"
-        ),
-        SAFE_MAX_CONTENT
-      );
-
-      try {
-        await interaction.reply({
-          content,
-          files: [attachment],
-          ephemeral: true,
-        });
-      } catch {
-        // Fallback: chunking if attachments fail (rare)
-        const json = JSON.stringify(plan, null, 2);
-        const chunks: string[] = [];
-        for (let i = 0; i < json.length; i += 1800) chunks.push(json.slice(i, i + 1800));
-
-        await interaction.reply({ content: chunks[0], ephemeral: true });
-        for (let i = 1; i < chunks.length; i++) {
-          await interaction.followUp({ content: chunks[i], ephemeral: true });
-        }
-      }
-      return;
-    }
-  }
-
-  // -----------------------------
-  // Button handling
-  // -----------------------------
-  private async handleButton(interaction: Interaction) {
-    if (!interaction.isButton()) return;
-
-    if (interaction.customId === "agent_approve") {
-      // Respect user's preference: do NOT defer; reply immediately and edit.
-      await interaction.reply({ content: "Executing approved plan...", ephemeral: true });
-
-      // Capture the plan for attachments BEFORE execution clears it.
-      const plan = this.agent.getLastPlan();
-      const planId = this.agent.getPendingPlanId() ?? "unknown";
-
-      try {
-        const result = await this.agent.executeApprovedPlan();
-
-        const planFileName = makeArtifactFileName("plan", result.planId, "json");
-        const diffFileName = makeArtifactFileName("diff", result.planId, "patch");
-
-        const attachments: AttachmentBuilder[] = [];
-
-        if (plan) attachments.push(asJsonAttachment(planFileName, plan));
-        attachments.push(asTextAttachment(diffFileName, result.diffFull));
-
-        const filesBlock = formatNameStatusList(result.filesChanged, 40);
-
-        const preview = clipText(result.diffSnippet ?? "", 900);
-        const previewBlock = toCodeBlock(preview, "diff");
-
-        const lines = [
-          "✅ Agent plan executed",
-          "",
-          "Branch: " + result.branch,
-          "Commit: " + result.commit,
-          "",
-          "Files changed:",
-          filesBlock,
-          "",
-          "Diff preview:",
-          previewBlock,
-          "",
-          "ℹ️ This branch exists locally. Push to GitHub with:",
-          "git push -u origin " + result.branch,
-          "",
-          "Attachments:",
-          plan ? `- ${planFileName}` : "- (plan attachment unavailable)",
-          `- ${diffFileName}`,
-        ];
-
-        const content = clipText(lines.join("\n"), SAFE_MAX_CONTENT);
-
-        await interaction.editReply({
-          content,
-          files: attachments,
-        });
-      } catch (err: any) {
-        const msg = err?.message ?? String(err);
-        const content = clipText(
-          [
-            "❌ Execution failed",
-            "",
-            msg,
-            "",
-            "If this says the plan produced no changes, it likely wrote identical content or the patch context did not match.",
-          ].join("\n"),
-          SAFE_MAX_CONTENT
-        );
-        await interaction.editReply({ content });
-      }
-      return;
-    }
-
-    if (interaction.customId === "agent_reject") {
-      this.agent.clearPendingPlan();
       await interaction.reply({
-        content: "Proposal rejected.",
+        content: clipText(
+          ["Plan preview:", clipText(JSON.stringify(plan, null, 2), 1200)].join(
+            "\n"
+          ),
+          SAFE_MAX_CONTENT
+        ),
+        files: [jsonAttachment(file, plan)],
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (interaction.commandName === "agent_status") {
+      await interaction.reply({
+        content: JSON.stringify(await this.agent.getStatus(), null, 2),
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (interaction.commandName === "agent_tokens") {
+      await interaction.reply({
+        content: JSON.stringify(await this.agent.getTokenStats(), null, 2),
         ephemeral: true,
       });
       return;
     }
   }
 
+  private async handleButton(interaction: Interaction) {
+    if (!interaction.isButton()) return;
+
+    if (interaction.customId === "agent_approve") {
+      await interaction.reply({
+        content: "Executing approved plan…",
+        ephemeral: true,
+      });
+
+      const plan = this.agent.getLastPlan();
+      const planId = this.agent.getPendingPlanId() ?? "unknown";
+
+      try {
+        const result = await this.agent.executeApprovedPlan();
+
+        const planFile = makeArtifactFileName("plan", planId, "json");
+        const diffFile = makeArtifactFileName("diff", planId, "patch");
+
+        const content = clipText(
+          [
+            "✅ Plan executed",
+            "",
+            `Branch: ${result.branch}`,
+            `Commit: ${result.commit}`,
+            "",
+            "Files changed:",
+            formatNameStatusList(result.filesChanged),
+            "",
+            "Diff preview:",
+            toCodeBlock(clipText(result.diffSnippet, 900), "diff"),
+            "",
+            "Push when ready:",
+            `git push -u origin ${result.branch}`,
+          ].join("\n"),
+          SAFE_MAX_CONTENT
+        );
+
+        await interaction.editReply({
+          content,
+          files: [
+            plan ? jsonAttachment(planFile, plan) : undefined,
+            textAttachment(diffFile, result.diffFull),
+          ].filter(Boolean) as AttachmentBuilder[],
+        });
+      } catch (err: any) {
+        await interaction.editReply(
+          "❌ Execution failed:\n" + (err?.message ?? String(err))
+        );
+      }
+      return;
+    }
+
+    if (interaction.customId === "agent_reject") {
+      this.agent.clearPendingPlan();
+      await interaction.reply({ content: "Proposal rejected.", ephemeral: true });
+    }
+  }
+
   private buildButtons() {
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    return new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId("agent_approve")
         .setLabel("Approve & Execute")
@@ -267,7 +227,5 @@ export class DiscordBot {
         .setLabel("Reject")
         .setStyle(ButtonStyle.Danger)
     );
-
-    return row;
   }
 }
