@@ -1,11 +1,11 @@
 import fs from "node:fs/promises";
+import path from "node:path";
 import simpleGit from "simple-git";
 
 import { ContextBuilder, type Trigger } from "./ContextBuilder.js";
 import { createPlanner } from "./PlannerFactory.js";
 import type { AgentConfig } from "./Config.js";
 import { GitService } from "./GitService.js";
-import { Guardrails } from "./Guardrails.js";
 import type { PatchPlan } from "../schemas/PatchPlan.js";
 import { loadLedger, type Ledger } from "../util/tokenLedger.js";
 import { resolveArtifactsDirAbs } from "../util/artifactsDir.js";
@@ -32,21 +32,19 @@ export class Agent {
   }
 
   // --------------------------------------------------
-  // ACTIVE REPO SELECTION (single source of truth)
+  // Active repo selection
   // --------------------------------------------------
   private resolveActiveRepo(mode: string) {
     if (mode === "self_improve") {
       return {
-        root: this.cfg.repoRoot, // tools/repo-agent
+        root: path.resolve(this.cfg.repoRoot), // tools/repo-agent
         git: new GitService(this.cfg.repoRoot),
-        allowedRoot: this.cfg.repoRoot,
       };
     }
 
     return {
-      root: this.cfg.targetRepoRoot, // src/
+      root: path.resolve(this.cfg.targetRepoRoot), // src/
       git: new GitService(this.cfg.targetRepoRoot),
-      allowedRoot: this.cfg.targetRepoRoot,
     };
   }
 
@@ -117,17 +115,16 @@ export class Agent {
     })) as PatchPlan;
 
     // --------------------------------------------------
-    // HARD SCOPE ENFORCEMENT (REPO-ROOT RELATIVE)
+    // HARD SCOPE ENFORCEMENT (CORRECT + SIMPLE)
     // --------------------------------------------------
     for (const op of plan.ops) {
-      if (op.file.startsWith("/") || op.file.includes("..")) {
-        throw new Error(`Invalid patch path: ${op.file}`);
+      if (path.isAbsolute(op.file)) {
+        throw new Error(`Absolute paths are not allowed: ${op.file}`);
       }
 
-      // Resolve path *as the executor will*
-      const resolved = new URL(op.file, `file://${active.root}/`).pathname;
+      const resolved = path.resolve(active.root, op.file);
 
-      if (!resolved.startsWith(active.allowedRoot)) {
+      if (!resolved.startsWith(active.root + path.sep)) {
         throw new Error(
           `Patch escapes active repo root (${mode}): ${op.file}`
         );
@@ -154,7 +151,7 @@ export class Agent {
     const branch = `agent/${this.pendingPlanId}`;
     const git = new GitService(active.root);
 
-    // Capture HEAD BEFORE branch creation
+    // Capture HEAD before branching so diffs are correct
     const headBefore = await git.getHeadSha();
 
     await git.createBranch(branch);
