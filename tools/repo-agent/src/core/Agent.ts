@@ -36,7 +36,7 @@ export class Agent {
   private resolveActiveRepo(mode: string) {
     if (mode === "self_improve") {
       return {
-        root: this.cfg.repoRoot,
+        root: this.cfg.repoRoot, // tools/repo-agent
         git: new GitService(this.cfg.repoRoot),
         isSelfImprove: true,
       };
@@ -122,7 +122,7 @@ export class Agent {
   }
 
   // -------------------------
-  // EXECUTION PHASE (FIXED)
+  // EXECUTION PHASE (FIXED ROOT)
   // -------------------------
   async executeApprovedPlan() {
     if (!this.pendingPlan || !this.pendingPlanId) {
@@ -140,21 +140,32 @@ export class Agent {
 
     await gitSvc.createBranch(branch);
 
-    const executor = new PatchExecutor({ repoRoot: active.root });
+    // 🔑 CRITICAL FIX:
+    // self_improve ops are relative to tools/repo-agent
+    const executorRoot = active.isSelfImprove
+      ? this.cfg.repoRoot
+      : active.root;
+
+    const executor = new PatchExecutor({ repoRoot: executorRoot });
     await executor.applyAll(this.pendingPlan.ops);
 
-    // ✅ FIX: check WORKING TREE, not commits
-    const workingDiff = await git.raw(["diff", "--name-status"]);
-    if (!workingDiff.trim()) {
+    // Detect working-tree changes
+    const status = await git.status();
+    const hasChanges =
+      status.not_added.length ||
+      status.created.length ||
+      status.modified.length ||
+      status.deleted.length ||
+      status.renamed.length;
+
+    if (!hasChanges) {
       throw new Error("Execution produced no changes.");
     }
 
-    // Stage + commit
     const commit = await gitSvc.addAllAndCommit(
       `agent: ${this.pendingPlan.meta?.goal ?? "apply"} (${this.pendingPlanId})`
     );
 
-    // Now compute commit diff for reporting
     const diffNames = await gitSvc.diffNameStatus(headBefore);
     const diffFull = await gitSvc.diffUnified(headBefore, 400_000);
 
