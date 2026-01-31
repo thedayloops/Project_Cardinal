@@ -2,18 +2,29 @@
 import OpenAI from "openai";
 import type { IPlanner, PlannerInput } from "./PlannerFactory.js";
 
+import {
+  recordTokenCall,
+  type TokenCall,
+} from "../util/tokenLedger.js";
+
 type OpenAIPlannerOpts = {
   apiKey: string;
   planningModel: string;
   patchModel: string; // reserved for later execution phase
+  artifactsDir: string; // ABSOLUTE path, injected by Agent
 };
 
 export class OpenAIPlanner implements IPlanner {
   private client: OpenAI;
+  private artifactsDir: string;
 
-  constructor(private opts: OpenAIPlannerOpts) {
+  constructor(opts: OpenAIPlannerOpts) {
     this.client = new OpenAI({ apiKey: opts.apiKey });
+    this.artifactsDir = opts.artifactsDir;
+    this.opts = opts;
   }
+
+  private opts: OpenAIPlannerOpts;
 
   async planPatch(input: PlannerInput) {
     const system = [
@@ -37,7 +48,7 @@ export class OpenAIPlanner implements IPlanner {
       "- Do NOT include markdown or commentary outside JSON.",
     ].join(" ");
 
-    const res = await this.client.responses.create({
+    const response = await this.client.responses.create({
       model: this.opts.planningModel,
       input: [
         { role: "system", content: system },
@@ -50,7 +61,6 @@ export class OpenAIPlanner implements IPlanner {
               repo: input.repo,
               filesPreview: input.filesPreview.map((f) => ({
                 path: f.path,
-                // truncate per-file to keep token usage sane
                 content:
                   f.content.length > 4000
                     ? f.content.slice(0, 4000) + "\n…TRUNCATED…"
@@ -65,8 +75,31 @@ export class OpenAIPlanner implements IPlanner {
       text: { format: { type: "json_object" } },
     });
 
-    // Responses API guarantees text, but be defensive
-    const raw = res.output_text?.trim();
+    // -------------------------------
+    // Token ledger (defensive)
+    // -------------------------------
+    try {
+      const usage = response.usage;
+      if (usage) {
+        const call: TokenCall = {
+          at: new Date().toISOString(),
+          model: this.opts.planningModel,
+          inputTokens: usage.input_tokens ?? 0,
+          outputTokens: usage.output_tokens ?? 0,
+          totalTokens: usage.total_tokens ?? 0,
+        };
+
+        await recordTokenCall(this.artifactsDir, call);
+      }
+    } catch (err) {
+      // Never break planning due to ledger failure
+      console.warn("[token-ledger] failed to record token usage:", err);
+    }
+
+    // -------------------------------
+    // Parse + normalize JSON
+    // -------------------------------
+    const raw = response.output_text?.trim();
     if (!raw) {
       throw new Error("Planner returned no output text");
     }
@@ -74,14 +107,22 @@ export class OpenAIPlanner implements IPlanner {
     let parsed: any;
     try {
       parsed = JSON.parse(raw);
-    } catch (err) {
-      throw new Error("Planner returned invalid JSON");
+    } catch (err: any) {
+      const preview =
+        raw.length > 500 ? raw.slice(0, 500) + "…TRUNCATED…" : raw;
+
+      throw new Error(
+        "Planner returned invalid JSON.\n\n" +
+          "JSON parse error:\n" +
+          String(err) +
+          "\n\nRaw output preview:\n" +
+          preview
+      );
     }
 
-    // -------------------------
+    // -------------------------------
     // Defensive normalization
-    // -------------------------
-
+    // -------------------------------
     if (!parsed.meta) {
       parsed.meta = {
         goal: "No changes proposed",
@@ -118,7 +159,7 @@ export class OpenAIPlanner implements IPlanner {
       parsed.verification.success_criteria = [];
     }
 
-    // Final sanity: scope must align with ops
+    // Final consistency
     if (parsed.ops.length > 0 && parsed.scope.total_ops === 0) {
       parsed.scope.total_ops = parsed.ops.length;
     }
