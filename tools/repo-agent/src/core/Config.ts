@@ -1,54 +1,28 @@
-// tools/repo-agent/src/core/Config.ts
 import path from "node:path";
 
-function mustEnv(key: string): string {
-  const v = process.env[key];
-  if (!v || v.trim() === "") throw new Error(`Missing required env var: ${key}`);
-  return v.trim();
-}
-
-function boolEnv(key: string, def = false): boolean {
-  const v = process.env[key];
-  if (!v) return def;
-  return ["1", "true", "yes", "y", "on"].includes(v.trim().toLowerCase());
-}
-
-function numEnv(key: string, def: number): number {
-  const v = process.env[key];
-  if (!v) return def;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : def;
-}
-
-function listEnv(key: string): string[] {
-  const v = process.env[key];
-  if (!v) return [];
-  return v
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
 export type AgentConfig = {
-  repoRoot: string;
+  // Roots
+  repoRoot: string;         // repo-agent root
+  targetRepoRoot: string;   // simulator / target repo root
+
+  // Artifacts
   artifactsDir: string;
+  artifactMaxCount: number;
+  artifactMaxAgeDays: number;
 
+  // Agent behavior
   enableLLM: boolean;
+  requireConfirm: boolean;
+  watch: boolean;
 
+  // OpenAI
   openai: {
     apiKey: string;
-    model: string; // planning model
-    patchModel: string; // patch model (reserved)
+    model: string;
+    patchModel: string;
   };
 
-  guardrails: {
-    maxFileBytes: number;
-    maxOps: number;
-    maxTotalWriteBytes: number;
-    lockedPathPrefixes: string[];
-    deniedPathPrefixes: string[];
-  };
-
+  // Planner limits
   planner: {
     maxFiles: number;
     maxCharsPerFile: number;
@@ -57,52 +31,83 @@ export type AgentConfig = {
     secondPassMaxFiles: number;
   };
 
-  discord: {
-    token: string;
-    clientId: string;
-    guildId: string;
-    channelId: string;
+  // Guardrails
+  guardrails: {
+    maxOps: number;
+    maxTotalWriteBytes: number;
+    maxFileBytes: number;
+    lockedPathPrefixes: string[];
+    deniedPathPrefixes: string[];
   };
+
+  // Token safety
+  tokenSafety: {
+    maxCallsPerDay: number;
+    allowWatchLLM: boolean;
+    maxFilesFromLLM: number;
+  };
+
+  nodeEnv: string;
 };
 
+function num(v: string | undefined, d: number) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+}
+
+function bool(v: string | undefined, d = false) {
+  if (v == null) return d;
+  return v === "true" || v === "1";
+}
+
 export function loadConfig(): AgentConfig {
-  const repoRoot = process.env.REPO_ROOT
-    ? path.resolve(process.env.REPO_ROOT)
-    : process.cwd();
+  const repoRoot = process.cwd();
+
+  const targetRepoRoot =
+    process.env.AGENT_TARGET_REPO_ROOT
+      ? path.resolve(process.env.AGENT_TARGET_REPO_ROOT)
+      : repoRoot; // safe default until you point it at the simulator
 
   return {
     repoRoot,
-    artifactsDir: process.env.AGENT_ARTIFACTS_DIR ?? "agent_artifacts",
+    targetRepoRoot,
 
-    enableLLM: boolEnv("AGENT_ENABLE_LLM", false),
+    artifactsDir: process.env.AGENT_ARTIFACTS_DIR ?? "agent_artifacts",
+    artifactMaxCount: num(process.env.AGENT_ARTIFACT_MAX_COUNT, 25),
+    artifactMaxAgeDays: num(process.env.AGENT_ARTIFACT_MAX_AGE_DAYS, 7),
+
+    enableLLM: bool(process.env.AGENT_ENABLE_LLM, true),
+    requireConfirm: bool(process.env.AGENT_REQUIRE_CONFIRM, true),
+    watch: bool(process.env.AGENT_WATCH, false),
 
     openai: {
-      apiKey: mustEnv("OPENAI_API_KEY"),
-      model: process.env.OPENAI_MODEL?.trim() || "gpt-5-mini",
-      patchModel: process.env.OPENAI_MODEL_PATCH?.trim() || "gpt-5",
-    },
-
-    guardrails: {
-      maxFileBytes: numEnv("AGENT_MAX_FILE_BYTES", 25_000),
-      maxOps: numEnv("AGENT_MAX_OPS", 20),
-      maxTotalWriteBytes: numEnv("AGENT_MAX_WRITE_BYTES", 200_000),
-      lockedPathPrefixes: listEnv("AGENT_LOCKED_PATHS"),
-      deniedPathPrefixes: listEnv("AGENT_DENIED_PATHS"),
+      apiKey: process.env.OPENAI_API_KEY ?? "",
+      model: process.env.OPENAI_MODEL ?? "gpt-5-mini",
+      patchModel: process.env.OPENAI_MODEL_PATCH ?? "gpt-5",
     },
 
     planner: {
-      maxFiles: numEnv("AGENT_PLANNER_MAX_FILES", 10),
-      maxCharsPerFile: numEnv("AGENT_PLANNER_MAX_CHARS_PER_FILE", 600),
-      maxTotalChars: numEnv("AGENT_PLANNER_MAX_TOTAL_CHARS", 12_000),
-      maxInputTokens: numEnv("AGENT_PLANNER_MAX_INPUT_TOKENS", 5000),
-      secondPassMaxFiles: numEnv("AGENT_PLANNER_SECOND_PASS_MAX_FILES", 16),
+      maxFiles: num(process.env.AGENT_PLANNER_MAX_FILES, 10),
+      maxCharsPerFile: num(process.env.AGENT_PLANNER_MAX_CHARS_PER_FILE, 15000),
+      maxTotalChars: num(process.env.AGENT_PLANNER_MAX_TOTAL_CHARS, 60000),
+      maxInputTokens: num(process.env.AGENT_PLANNER_MAX_INPUT_TOKENS, 30000),
+      secondPassMaxFiles: num(process.env.AGENT_PLANNER_SECOND_PASS_MAX_FILES, 16),
     },
 
-    discord: {
-      token: mustEnv("DISCORD_TOKEN"),
-      clientId: mustEnv("DISCORD_CLIENT_ID"),
-      guildId: mustEnv("DISCORD_GUILD_ID"),
-      channelId: mustEnv("DISCORD_CHANNEL_ID"),
+    guardrails: {
+      maxOps: num(process.env.AGENT_MAX_OPS, 25),
+      maxTotalWriteBytes: num(process.env.AGENT_MAX_WRITE_BYTES, 300000),
+      maxFileBytes: 300_000,
+      lockedPathPrefixes: ["node_modules/", ".git/"],
+      deniedPathPrefixes: [],
     },
+
+    tokenSafety: {
+      maxCallsPerDay: num(process.env.AGENT_MAX_LLM_CALLS_PER_DAY, 50),
+      allowWatchLLM: bool(process.env.AGENT_ALLOW_WATCH_LLM, false),
+      maxFilesFromLLM: num(process.env.AGENT_MAX_FILES_FROM_LLM, 20),
+    },
+
+    nodeEnv: process.env.NODE_ENV ?? "development",
   };
 }

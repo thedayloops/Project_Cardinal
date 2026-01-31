@@ -1,80 +1,41 @@
-// tools/repo-agent/src/index.ts
-import dotenv from "dotenv";
 import path from "node:path";
+import dotenv from "dotenv";
 
-// Load .env from project root (two levels up)
+// -----------------------------------------------------------------------------
+// Explicitly load ROOT .env (repo-agent runs from tools/repo-agent)
+// -----------------------------------------------------------------------------
 dotenv.config({
   path: path.resolve(process.cwd(), "../../.env"),
 });
 
-import { REST, Routes } from "discord.js";
 import { loadConfig } from "./core/Config.js";
 import { Agent } from "./core/Agent.js";
 import { DiscordBot } from "./integrations/DiscordBot.js";
+import { registerCommands } from "./integrations/registerCommands.js";
 
 async function main() {
-  const config = loadConfig();
+  const cfg = loadConfig();
 
-  console.log("[bootstrap] Loaded env from repo root");
-  console.log("[bootstrap] Registering slash commands (guild-only)");
+  const discordToken = process.env.DISCORD_TOKEN;
+  const clientId = process.env.DISCORD_CLIENT_ID;
+  const guildId = process.env.DISCORD_GUILD_ID; // guild registration = instant updates
 
-  const commands = [
-    {
-      name: "agent_run",
-      description: "Run the repository agent",
-      options: [
-        {
-          name: "mode",
-          description: "Execution mode",
-          type: 3, // STRING
-          required: true,
-          choices: [
-            { name: "plan", value: "plan" },
-            { name: "verify", value: "verify" },
-            { name: "deep", value: "deep" }
-          ]
-        },
-        {
-          name: "reason",
-          description: "Optional reason or goal",
-          type: 3,
-          required: false
-        }
-      ]
-    },
-    {
-      name: "agent_status",
-      description: "Show agent status"
-    },
-    {
-      name: "agent_tokens",
-      description: "Show OpenAI token usage"
-    },
-    {
-      name: "agent_explain",
-      description: "Explain the last agent plan in detail"
-    }
-  ];
+  if (!discordToken) throw new Error("DISCORD_TOKEN is not set");
+  if (!clientId) throw new Error("DISCORD_CLIENT_ID is not set");
 
-  const rest = new REST({ version: "10" }).setToken(config.discord.token);
+  // ---------------------------------------------------------------------------
+  // ALWAYS register slash commands on startup
+  // This guarantees new options (like self_improve) appear immediately
+  // ---------------------------------------------------------------------------
+  await registerCommands(discordToken, clientId, guildId);
 
-  await rest.put(
-    Routes.applicationGuildCommands(
-      config.discord.clientId,
-      config.discord.guildId
-    ),
-    { body: commands }
-  );
-
-  console.log("[bootstrap] Slash commands registered");
-
-  const agent = new Agent(config);
+  const agent = new Agent(cfg);
   const bot = new DiscordBot(agent);
 
-  await bot.start(config.discord.token);
+  await bot.start(discordToken);
 }
 
 main().catch((err) => {
-  console.error("[bootstrap] fatal error", err);
+  console.error(err);
   process.exit(1);
 });

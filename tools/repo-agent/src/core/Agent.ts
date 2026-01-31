@@ -1,4 +1,3 @@
-// tools/repo-agent/src/core/Agent.ts
 import fs from "node:fs/promises";
 import simpleGit from "simple-git";
 
@@ -12,85 +11,52 @@ import { loadLedger, type Ledger } from "../util/tokenLedger.js";
 import { resolveArtifactsDirAbs } from "../util/artifactsDir.js";
 import { PatchExecutor } from "./PatchExecutor.js";
 
-export type AgentProposal = {
-  planId: string;
-  patchPlan: PatchPlan;
-};
-
-export type StatusResult = {
-  online: boolean;
-  llm_enabled: boolean;
-  planner: string;
-  repoRoot: string;
-  branch: string;
-  head: string;
-  git_status: string;
-  pending_plan: boolean;
-};
-
-function normalizePlanForGuardrails(plan: PatchPlan): PatchPlan {
-  // Hardening: ensure planner outputs always satisfy Guardrails' minimum shape.
-  // This is intentionally conservative and only normalizes known footguns.
-  for (const op of plan.ops ?? []) {
-    if ((op as any).start_line == null || (op as any).start_line < 1) {
-      (op as any).start_line = 1;
-    }
-    if (op.type === "create_file" || op.type === "update_file") {
-      (op as any).end_line = null;
-    }
-    // Normalize Windows paths to forward slashes for consistency.
-    if (typeof (op as any).file === "string") {
-      (op as any).file = (op as any).file.replace(/\\/g, "/");
-    }
-  }
-  // Keep scope in sync (avoid misleading summaries)
-  if (!plan.scope.total_ops || plan.scope.total_ops <= 0) {
-    plan.scope.total_ops = plan.ops?.length ?? 0;
-  }
-  if ((plan.scope.files?.length ?? 0) === 0 && (plan.ops?.length ?? 0) > 0) {
-    plan.scope.files = Array.from(new Set((plan.ops ?? []).map((o: any) => o.file))).filter(Boolean);
-  }
-  return plan;
-}
-
 export class Agent {
   private cfg: AgentConfig;
-  private gitSvc: GitService;
   private planner: ReturnType<typeof createPlanner>;
-  private guardrails: Guardrails;
 
   private artifactsAbsDir: string;
+
   private pendingPlan: PatchPlan | null = null;
   private pendingPlanId: string | null = null;
 
   constructor(cfg: AgentConfig) {
     this.cfg = cfg;
-    this.gitSvc = new GitService(cfg.repoRoot);
     this.planner = createPlanner(cfg);
 
-    this.artifactsAbsDir = resolveArtifactsDirAbs(cfg.repoRoot, cfg.artifactsDir);
-
-    this.guardrails = new Guardrails({
-      repoRoot: cfg.repoRoot,
-      lockedPathPrefixes: cfg.guardrails.lockedPathPrefixes,
-      deniedPathPrefixes: cfg.guardrails.deniedPathPrefixes,
-      maxOps: cfg.guardrails.maxOps,
-      maxTotalPatchBytes: cfg.guardrails.maxTotalWriteBytes,
-    });
+    this.artifactsAbsDir = resolveArtifactsDirAbs(
+      cfg.repoRoot,
+      cfg.artifactsDir
+    );
 
     fs.mkdir(this.artifactsAbsDir, { recursive: true }).catch(() => {});
+  }
+
+  // -------------------------
+  // Repo routing (THE KEY)
+  // -------------------------
+  private resolveActiveRepo(mode: string) {
+    if (mode === "self_improve") {
+      return {
+        root: this.cfg.repoRoot,
+        git: new GitService(this.cfg.repoRoot),
+        allowedPrefix: "tools/repo-agent/",
+      };
+    }
+
+    return {
+      root: this.cfg.targetRepoRoot,
+      git: new GitService(this.cfg.targetRepoRoot),
+      allowedPrefix: "",
+    };
   }
 
   async getStatus() {
     return {
       online: true,
-      llm_enabled: this.cfg.enableLLM,
-      planner: this.cfg.enableLLM ? "openai" : "stub",
-      repoRoot: this.cfg.repoRoot,
-      branch: await this.gitSvc.getCurrentBranch(),
-      head: await this.gitSvc.getHeadSha(),
-      git_status: await this.gitSvc.statusSummary(),
       pending_plan: Boolean(this.pendingPlan),
+      repo_agent_root: this.cfg.repoRoot,
+      target_repo_root: this.cfg.targetRepoRoot,
     };
   }
 
@@ -98,11 +64,11 @@ export class Agent {
     return loadLedger(this.artifactsAbsDir);
   }
 
-  getLastPlan(): PatchPlan | null {
+  getLastPlan() {
     return this.pendingPlan;
   }
 
-  getPendingPlanId(): string | null {
+  getPendingPlanId() {
     return this.pendingPlanId;
   }
 
@@ -111,8 +77,12 @@ export class Agent {
     this.pendingPlanId = null;
   }
 
-  async run(mode: string, reason: string | null): Promise<AgentProposal> {
+  // -------------------------
+  // PLAN PHASE
+  // -------------------------
+  async run(mode: string, reason: string | null) {
     const planId = `plan_${Date.now()}`;
+    const active = this.resolveActiveRepo(mode);
 
     const trigger: Trigger = {
       kind: "discord",
@@ -120,8 +90,9 @@ export class Agent {
       mode,
     };
 
-    const git = simpleGit(this.cfg.repoRoot);
-    const ctxBuilder = new ContextBuilder(this.cfg.repoRoot, git, {
+    const git = simpleGit(active.root);
+
+    const ctxBuilder = new ContextBuilder(active.root, git, {
       maxFileBytes: this.cfg.guardrails.maxFileBytes,
       maxFiles: this.cfg.planner.maxFiles,
       maxCharsPerFile: this.cfg.planner.maxCharsPerFile,
@@ -131,7 +102,11 @@ export class Agent {
     const ctx = await ctxBuilder.buildMinimal(trigger);
 
     const plan = (await this.planner.planPatch({
-      repo: { root: this.cfg.repoRoot, headSha: ctx.headSha, branch: ctx.branch },
+      repo: {
+        root: active.root,
+        headSha: ctx.headSha,
+        branch: ctx.branch,
+      },
       scope: {
         files: ctx.files.map((f) => f.path),
         total_ops: 0,
@@ -140,52 +115,64 @@ export class Agent {
       mode,
       reason: reason ?? undefined,
       filesPreview: ctx.files,
-    } as any)) as PatchPlan;
+    })) as PatchPlan;
 
-    normalizePlanForGuardrails(plan);
-
-    // Confidence gate for self-improvement
-    if (mode === "self_improve" && (plan.meta?.confidence ?? 0) < 0.6) {
-      throw new Error("Self-improvement confidence too low.");
+    // -------------------------
+    // HARD SCOPE ENFORCEMENT
+    // -------------------------
+    if (mode === "self_improve") {
+      for (const op of plan.ops) {
+        if (!op.file.startsWith("tools/repo-agent/")) {
+          throw new Error(
+            `self_improve plans may only modify tools/repo-agent/** (found: ${op.file})`
+          );
+        }
+      }
+    } else {
+      for (const op of plan.ops) {
+        if (op.file.startsWith("tools/repo-agent/")) {
+          throw new Error(
+            `Non-self_improve modes may NOT modify repo-agent files (${op.file})`
+          );
+        }
+      }
     }
 
-    this.guardrails.validatePatchPlan(plan);
     this.pendingPlan = plan;
     this.pendingPlanId = planId;
 
     return { planId, patchPlan: plan };
   }
 
+  // -------------------------
+  // EXECUTION PHASE
+  // -------------------------
   async executeApprovedPlan() {
     if (!this.pendingPlan || !this.pendingPlanId) {
-      throw new Error("No pending plan to execute.");
+      throw new Error("No pending plan.");
     }
 
-    this.guardrails.validatePatchPlan(this.pendingPlan);
+    const mode = (this.pendingPlan as any)?.meta?.mode ?? "unknown";
+    const active = this.resolveActiveRepo(mode);
 
-    const planId = this.pendingPlanId;
-    const branchName = `agent/${planId}`;
-    const baseRef = "HEAD";
+    const branch = `agent/${this.pendingPlanId}`;
+    const git = new GitService(active.root);
 
-    await this.gitSvc.createBranch(branchName);
+    await git.createBranch(branch);
 
-    const executor = new PatchExecutor({ repoRoot: this.cfg.repoRoot });
+    const executor = new PatchExecutor({ repoRoot: active.root });
     await executor.applyAll(this.pendingPlan.ops);
 
-    // 🔒 ENFORCE NON-EMPTY DIFF
-    const diffNames = await this.gitSvc.diffNameStatus(baseRef);
+    const diffNames = await git.diffNameStatus("HEAD");
     if (!diffNames.trim()) {
-      throw new Error(
-        "Patch execution produced no file changes. Commit aborted."
-      );
+      throw new Error("Execution produced no changes.");
     }
 
-    const goal = this.pendingPlan.meta?.goal ?? "apply patch";
-    const commit = await this.gitSvc.addAllAndCommit(
-      `agent: ${goal} (${planId})`
+    const commit = await git.addAllAndCommit(
+      `agent: ${this.pendingPlan.meta?.goal ?? "apply"} (${this.pendingPlanId})`
     );
 
-    const diffFull = await this.gitSvc.diffUnified(baseRef, 400_000);
+    const diffFull = await git.diffUnified("HEAD", 400_000);
     const diffSnippet =
       diffFull.length > 1800
         ? diffFull.slice(0, 1800) + "\n…TRUNCATED…"
@@ -194,10 +181,9 @@ export class Agent {
     this.clearPendingPlan();
 
     return {
-      planId,
-      branch: branchName,
+      branch,
       commit,
-      filesChanged: diffNames.trim(),
+      filesChanged: diffNames,
       diffSnippet,
       diffFull,
     };
