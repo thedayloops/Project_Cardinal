@@ -8,9 +8,9 @@ import { createPlanner } from "./PlannerFactory.js";
 import type { AgentConfig } from "./Config.js";
 import { GitService } from "./GitService.js";
 import { Guardrails } from "./Guardrails.js";
-import type { PatchPlan, PatchOp } from "../schemas/PatchPlan.js";
-
+import type { PatchPlan } from "../schemas/PatchPlan.js";
 import { loadLedger, type Ledger } from "../util/tokenLedger.js";
+import { PatchExecutor } from "./PatchExecutor.js";
 
 export type AgentProposal = {
   planId: string;
@@ -28,13 +28,16 @@ export type StatusResult = {
   pending_plan: boolean;
 };
 
+function estimateTokensFromChars(chars: number): number {
+  return Math.ceil(chars / 4);
+}
+
 export class Agent {
   private cfg: AgentConfig;
   private gitSvc: GitService;
   private planner: ReturnType<typeof createPlanner>;
   private guardrails: Guardrails;
 
-  // Absolute artifacts directory (locked)
   private artifactsAbsDir: string;
 
   private pendingPlan: PatchPlan | null = null;
@@ -45,7 +48,6 @@ export class Agent {
     this.gitSvc = new GitService(cfg.repoRoot);
     this.planner = createPlanner(cfg);
 
-    // Lock artifacts dir to repoRoot + artifactsDir (absolute, deterministic)
     this.artifactsAbsDir = path.isAbsolute(cfg.artifactsDir)
       ? cfg.artifactsDir
       : path.resolve(cfg.repoRoot, cfg.artifactsDir);
@@ -58,13 +60,9 @@ export class Agent {
       maxTotalPatchBytes: cfg.guardrails.maxTotalWriteBytes,
     });
 
-    // Ensure artifacts directory exists
     void fs.mkdir(this.artifactsAbsDir, { recursive: true });
   }
 
-  // -----------------------------
-  // STATUS
-  // -----------------------------
   async getStatus(): Promise<StatusResult> {
     return {
       online: true,
@@ -78,80 +76,10 @@ export class Agent {
     };
   }
 
-  // -----------------------------
-  // TOKEN LEDGER (read-only)
-  // -----------------------------
   async getTokenStats(): Promise<Ledger> {
-    // Ledger stores to token_ledger.json inside artifacts dir
     return loadLedger(this.artifactsAbsDir);
   }
 
-  // -----------------------------
-  // PLAN GENERATION
-  // -----------------------------
-  async run(mode: string, reason: string | null): Promise<AgentProposal> {
-    if (!this.cfg.enableLLM) {
-      // Keep your output stable even if disabled
-      const noop: PatchPlan = {
-        meta: {
-          goal: "No changes proposed",
-          rationale: "LLM is disabled.",
-          confidence: 0,
-        },
-        scope: { files: [], total_ops: 0, estimated_bytes_changed: 0 },
-        expected_effects: [],
-        ops: [],
-        verification: { steps: [], success_criteria: [] },
-      };
-
-      this.pendingPlan = noop;
-      this.pendingPlanId = `plan_${Date.now()}`;
-
-      return { planId: this.pendingPlanId, patchPlan: noop };
-    }
-
-    const trigger: Trigger = {
-      kind: "discord",
-      command: "agent_run",
-      mode,
-    };
-
-    // Use a real SimpleGit instance for ContextBuilder so it can resolve HEAD/branch
-    const git = simpleGit(this.cfg.repoRoot);
-
-    const ctxBuilder = new ContextBuilder(this.cfg.repoRoot, git, {
-      maxFileBytes: this.cfg.guardrails.maxFileBytes,
-    });
-
-    const ctx = await ctxBuilder.buildMinimal(trigger);
-    const planId = `plan_${Date.now()}`;
-
-    const plannerInput = {
-      repo: { root: ctx.repoRoot, headSha: ctx.headSha, branch: ctx.branch },
-      scope: {
-        files: ctx.files.map((f) => f.path),
-        total_ops: 0,
-        estimated_bytes_changed: 0,
-      },
-      reason: reason ?? undefined,
-      mode,
-      filesPreview: ctx.files,
-    };
-
-    const plan = (await this.planner.planPatch(plannerInput)) as PatchPlan;
-
-    // Validate plan against Guardrails (ops count/bytes/paths/etc.)
-    this.guardrails.validatePatchPlan(plan);
-
-    this.pendingPlan = plan;
-    this.pendingPlanId = planId;
-
-    return { planId, patchPlan: plan };
-  }
-
-  // -----------------------------
-  // PLAN ACCESS
-  // -----------------------------
   getLastPlan(): PatchPlan | null {
     return this.pendingPlan;
   }
@@ -161,10 +89,134 @@ export class Agent {
     this.pendingPlanId = null;
   }
 
-  // -----------------------------
-  // APPROVE + EXECUTE
-  // -----------------------------
+  async run(mode: string, reason: string | null): Promise<AgentProposal> {
+    const planId = `plan_${Date.now()}`;
+
+    const trigger: Trigger = {
+      kind: "discord",
+      command: "agent_run",
+      mode,
+    };
+
+    if (!this.cfg.enableLLM) {
+      const noop: PatchPlan = {
+        meta: { goal: "noop", rationale: "LLM disabled", confidence: 0 },
+        scope: { files: [], total_ops: 0, estimated_bytes_changed: 0 },
+        expected_effects: [],
+        ops: [],
+        verification: { steps: [], success_criteria: [] },
+      };
+      this.pendingPlan = noop;
+      this.pendingPlanId = planId;
+      return { planId, patchPlan: noop };
+    }
+
+    const git = simpleGit(this.cfg.repoRoot);
+
+    const buildCtx = async (maxFiles: number) => {
+      const ctxBuilder = new ContextBuilder(this.cfg.repoRoot, git, {
+        maxFileBytes: this.cfg.guardrails.maxFileBytes,
+        maxFiles,
+        maxCharsPerFile: this.cfg.planner.maxCharsPerFile,
+        maxTotalChars: this.cfg.planner.maxTotalChars,
+      });
+      return ctxBuilder.buildMinimal(trigger);
+    };
+
+    const ctx1 = await buildCtx(this.cfg.planner.maxFiles);
+
+    const trimToBudget = (files: { path: string; content: string }[]) => {
+      let out = [...files];
+      while (out.length > 1) {
+        const payloadStr = JSON.stringify({
+          repo: { root: this.cfg.repoRoot, headSha: ctx1.headSha, branch: ctx1.branch },
+          mode,
+          reason: reason ?? undefined,
+          scope: { files: out.map((f) => f.path), total_ops: 0, estimated_bytes_changed: 0 },
+          filesPreview: out,
+        });
+        const est = estimateTokensFromChars(payloadStr.length + 800);
+        if (est <= this.cfg.planner.maxInputTokens) return out;
+        out.pop();
+      }
+
+      const payloadStr = JSON.stringify({
+        repo: { root: this.cfg.repoRoot, headSha: ctx1.headSha, branch: ctx1.branch },
+        mode,
+        reason: reason ?? undefined,
+        scope: { files: out.map((f) => f.path), total_ops: 0, estimated_bytes_changed: 0 },
+        filesPreview: out,
+      });
+
+      const est = estimateTokensFromChars(payloadStr.length + 800);
+      if (est > this.cfg.planner.maxInputTokens) {
+        throw new Error(
+          `Planner input budget exceeded even after trimming (est ${est} > ${this.cfg.planner.maxInputTokens}). ` +
+            `Reduce AGENT_PLANNER_MAX_CHARS_PER_FILE or AGENT_PLANNER_MAX_TOTAL_CHARS.`
+        );
+      }
+      return out;
+    };
+
+    // pass 1
+    const pass1Files = trimToBudget(ctx1.files);
+
+    const plannerInput1 = {
+      repo: { root: this.cfg.repoRoot, headSha: ctx1.headSha, branch: ctx1.branch },
+      scope: { files: pass1Files.map((f) => f.path), total_ops: 0, estimated_bytes_changed: 0 },
+      reason: reason ?? undefined,
+      mode,
+      filesPreview: pass1Files,
+    };
+
+    const plan1 = (await this.planner.planPatch(plannerInput1 as any)) as PatchPlan;
+    this.guardrails.validatePatchPlan(plan1);
+
+    const wantsSecond =
+      ["plan", "verify", "deep"].includes(mode) &&
+      (plan1.ops?.length ?? 0) === 0 &&
+      this.cfg.planner.secondPassMaxFiles > this.cfg.planner.maxFiles;
+
+    if (wantsSecond) {
+      try {
+        const ctx2 = await buildCtx(this.cfg.planner.secondPassMaxFiles);
+        const pass2Files = trimToBudget(ctx2.files);
+
+        const plannerInput2 = {
+          repo: { root: this.cfg.repoRoot, headSha: ctx2.headSha, branch: ctx2.branch },
+          scope: { files: pass2Files.map((f) => f.path), total_ops: 0, estimated_bytes_changed: 0 },
+          reason: reason ?? undefined,
+          mode,
+          filesPreview: pass2Files,
+        };
+
+        const plan2 = (await this.planner.planPatch(plannerInput2 as any)) as PatchPlan;
+        this.guardrails.validatePatchPlan(plan2);
+
+        if (
+          (plan2.ops?.length ?? 0) > 0 ||
+          (plan2.meta?.confidence ?? 0) >= (plan1.meta?.confidence ?? 0)
+        ) {
+          this.pendingPlan = plan2;
+          this.pendingPlanId = planId;
+          return { planId, patchPlan: plan2 };
+        }
+      } catch {
+        // ignore; keep plan1
+      }
+    }
+
+    this.pendingPlan = plan1;
+    this.pendingPlanId = planId;
+    return { planId, patchPlan: plan1 };
+  }
+
+  /**
+   * Executes the currently pending plan on a NEW branch: agent/<planId>.
+   * Always validates guardrails before touching disk.
+   */
   async executeApprovedPlan(): Promise<{
+    planId: string;
     branch: string;
     commit: string;
     filesChanged: string;
@@ -175,133 +227,40 @@ export class Agent {
       throw new Error("No pending plan to execute.");
     }
 
-    // Validate again right before applying (defense in depth)
+    // defense-in-depth: validate again
     this.guardrails.validatePatchPlan(this.pendingPlan);
 
+    const planId = this.pendingPlanId;
     const baseRef = "HEAD";
-    const branchName = `agent/${this.pendingPlanId}`;
+    const branchName = `agent/${planId}`;
 
     // Create branch off current HEAD
     await this.gitSvc.createBranch(branchName);
 
-    // Apply ops to filesystem inside repoRoot
-    await this.applyOps(this.pendingPlan.ops);
+    // Apply patch ops
+    const executor = new PatchExecutor({ repoRoot: this.cfg.repoRoot });
+    await executor.applyAll(this.pendingPlan.ops);
 
-    // Commit changes
-    const commit = await this.gitSvc.addAllAndCommit(
-      `agent: apply ${this.pendingPlanId}`
-    );
+    // Commit
+    const goal = this.pendingPlan.meta?.goal ?? "apply patch";
+    const commit = await this.gitSvc.addAllAndCommit(`agent: ${goal} (${planId})`);
 
-    // Summaries
+    // Diff summary
     const filesChanged = await this.gitSvc.diffNameStatus(baseRef);
-    const diffFull = await this.gitSvc.diffUnified(baseRef, 200_000);
-    const diffSnippet = diffFull.length > 1800 ? diffFull.slice(0, 1800) + "\n...TRUNCATED..." : diffFull;
+    const diffFull = await this.gitSvc.diffUnified(baseRef, 400_000);
+    const diffSnippet =
+      diffFull.length > 1800 ? diffFull.slice(0, 1800) + "\n...TRUNCATED..." : diffFull;
 
-    // Clear pending plan
+    // Clear pending plan once committed
     this.clearPendingPlan();
 
     return {
+      planId,
       branch: branchName,
       commit,
       filesChanged: filesChanged.trim(),
       diffSnippet,
       diffFull,
     };
-  }
-
-  // -----------------------------
-  // OP APPLIER (PatchOp)
-  // -----------------------------
-  private async applyOps(ops: PatchOp[]) {
-    for (const op of ops) {
-      const abs = this.absPath(op.file);
-
-      switch (op.type) {
-        case "create_file": {
-          await fs.mkdir(path.dirname(abs), { recursive: true });
-          await fs.writeFile(abs, op.patch ?? "", "utf8");
-          break;
-        }
-
-        case "update_file": {
-          await fs.mkdir(path.dirname(abs), { recursive: true });
-          await fs.writeFile(abs, op.patch ?? "", "utf8");
-          break;
-        }
-
-        case "replace_range":
-        case "insert_after":
-        case "delete_range": {
-          const exists = await this.exists(abs);
-          if (!exists) throw new Error(`Target file does not exist: ${op.file}`);
-
-          const raw = await fs.readFile(abs, "utf8");
-          const lines = raw.split(/\r?\n/);
-
-          // start_line/end_line are 1-based and inclusive
-          const startIdx = op.start_line - 1;
-
-          if (startIdx < 0 || startIdx > lines.length) {
-            throw new Error(`start_line out of bounds for ${op.file} (op ${op.id})`);
-          }
-
-          const newText = (op.patch ?? "");
-          const newLines = newText.length ? newText.split(/\r?\n/) : [];
-
-          if (op.type === "insert_after") {
-            // Insert AFTER start_line -> insert at startIdx + 1
-            const insertAt = startIdx + 1;
-            lines.splice(insertAt, 0, ...newLines);
-            await fs.writeFile(abs, lines.join("\n"), "utf8");
-            break;
-          }
-
-          if (op.end_line === null) {
-            throw new Error(`${op.type} requires end_line (op ${op.id})`);
-          }
-
-          const endIdx = op.end_line - 1;
-          if (endIdx < startIdx || endIdx >= lines.length) {
-            throw new Error(`end_line out of bounds for ${op.file} (op ${op.id})`);
-          }
-
-          if (op.type === "delete_range") {
-            lines.splice(startIdx, endIdx - startIdx + 1);
-            await fs.writeFile(abs, lines.join("\n"), "utf8");
-            break;
-          }
-
-          // replace_range
-          lines.splice(startIdx, endIdx - startIdx + 1, ...newLines);
-          await fs.writeFile(abs, lines.join("\n"), "utf8");
-          break;
-        }
-
-        default: {
-          const _exhaustive: never = op.type;
-          throw new Error(`Unknown op type: ${_exhaustive}`);
-        }
-      }
-    }
-  }
-
-  private absPath(rel: string) {
-    const abs = path.resolve(this.cfg.repoRoot, rel);
-    const root = path.resolve(this.cfg.repoRoot);
-
-    // sandbox: ensure file stays under repoRoot
-    if (!abs.startsWith(root + path.sep) && abs !== root) {
-      throw new Error(`Path escapes repoRoot: ${rel}`);
-    }
-    return abs;
-  }
-
-  private async exists(p: string) {
-    try {
-      await fs.stat(p);
-      return true;
-    } catch {
-      return false;
-    }
   }
 }

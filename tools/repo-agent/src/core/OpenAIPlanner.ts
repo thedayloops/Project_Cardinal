@@ -1,165 +1,93 @@
 // tools/repo-agent/src/core/OpenAIPlanner.ts
 import OpenAI from "openai";
 import type { IPlanner, PlannerInput } from "./PlannerFactory.js";
-
-import {
-  recordTokenCall,
-  type TokenCall,
-} from "../util/tokenLedger.js";
+import { recordTokenCall, type TokenCall } from "../util/tokenLedger.js";
 
 type OpenAIPlannerOpts = {
   apiKey: string;
   planningModel: string;
   patchModel: string; // reserved for later execution phase
-  artifactsDir: string; // ABSOLUTE path, injected by Agent
+  artifactsDir: string; // absolute artifacts dir for token ledger
 };
 
 export class OpenAIPlanner implements IPlanner {
   private client: OpenAI;
-  private artifactsDir: string;
 
-  constructor(opts: OpenAIPlannerOpts) {
+  constructor(private opts: OpenAIPlannerOpts) {
     this.client = new OpenAI({ apiKey: opts.apiKey });
-    this.artifactsDir = opts.artifactsDir;
-    this.opts = opts;
   }
 
-  private opts: OpenAIPlannerOpts;
-
   async planPatch(input: PlannerInput) {
-    const system = [
-      "You are a repository planning agent.",
-      "You MUST return a single valid JSON object and nothing else.",
-      "The JSON MUST match this exact shape:",
-      "{",
-      "  meta:{goal:string,rationale:string,confidence:number},",
-      "  scope:{files:string[],total_ops:number,estimated_bytes_changed:number},",
-      "  expected_effects:string[],",
-      "  ops:array,",
-      "  verification:{steps:string[],success_criteria:string[]}",
-      "}",
-      "",
-      "Rules:",
-      "- If mode is 'plan', 'verify', or 'deep', you SHOULD propose at least one small improvement if any reasonable improvement exists.",
-      "- Improvements may include: docs, comments, safety checks, typing, validation, logging, or TODO notes.",
-      "- If no code changes are needed, ops MAY be empty, but meta.goal must explain why.",
-      "- Prefer minimal, low-risk changes.",
-      "- Never invent files that do not exist.",
-      "- Do NOT include markdown or commentary outside JSON.",
-    ].join(" ");
+    // Keep this short to save tokens
+    const system =
+      "Return ONLY valid JSON matching PatchPlan: " +
+      "{meta:{goal,rationale,confidence},scope:{files,total_ops,estimated_bytes_changed},expected_effects,ops,verification:{steps,success_criteria}}. " +
+      "Prefer minimal, low-risk improvements. Never invent files. No markdown.";
 
-    const response = await this.client.responses.create({
+    const payload = {
+      mode: input.mode,
+      reason: input.reason ?? null,
+      repo: input.repo,
+      scope: input.scope,
+      filesPreview: input.filesPreview,
+    };
+
+    const res = await this.client.responses.create({
       model: this.opts.planningModel,
       input: [
         { role: "system", content: system },
-        {
-          role: "user",
-          content: JSON.stringify(
-            {
-              mode: input.mode,
-              reason: input.reason ?? null,
-              repo: input.repo,
-              filesPreview: input.filesPreview.map((f) => ({
-                path: f.path,
-                content:
-                  f.content.length > 4000
-                    ? f.content.slice(0, 4000) + "\n…TRUNCATED…"
-                    : f.content,
-              })),
-            },
-            null,
-            2
-          ),
-        },
+        { role: "user", content: JSON.stringify(payload) },
       ],
       text: { format: { type: "json_object" } },
     });
 
-    // -------------------------------
     // Token ledger (defensive)
-    // -------------------------------
     try {
-      const usage = response.usage;
-      if (usage) {
+      const u = (res as any).usage;
+      if (u) {
         const call: TokenCall = {
           at: new Date().toISOString(),
           model: this.opts.planningModel,
-          inputTokens: usage.input_tokens ?? 0,
-          outputTokens: usage.output_tokens ?? 0,
-          totalTokens: usage.total_tokens ?? 0,
+          inputTokens: u.input_tokens ?? 0,
+          outputTokens: u.output_tokens ?? 0,
+          totalTokens: u.total_tokens ?? 0,
         };
-
-        await recordTokenCall(this.artifactsDir, call);
+        await recordTokenCall(this.opts.artifactsDir, call);
       }
-    } catch (err) {
-      // Never break planning due to ledger failure
-      console.warn("[token-ledger] failed to record token usage:", err);
+    } catch (e) {
+      console.warn("[token-ledger] failed to record usage:", e);
     }
 
-    // -------------------------------
-    // Parse + normalize JSON
-    // -------------------------------
-    const raw = response.output_text?.trim();
-    if (!raw) {
-      throw new Error("Planner returned no output text");
-    }
+    const raw = res.output_text?.trim();
+    if (!raw) throw new Error("Planner returned no output text");
 
     let parsed: any;
     try {
       parsed = JSON.parse(raw);
     } catch (err: any) {
-      const preview =
-        raw.length > 500 ? raw.slice(0, 500) + "…TRUNCATED…" : raw;
-
+      const preview = raw.length > 800 ? raw.slice(0, 800) + "\n…TRUNCATED…" : raw;
       throw new Error(
         "Planner returned invalid JSON.\n\n" +
-          "JSON parse error:\n" +
           String(err) +
-          "\n\nRaw output preview:\n" +
+          "\n\nRaw preview:\n" +
           preview
       );
     }
 
-    // -------------------------------
     // Defensive normalization
-    // -------------------------------
     if (!parsed.meta) {
-      parsed.meta = {
-        goal: "No changes proposed",
-        rationale: "Planner did not return meta information.",
-        confidence: 0,
-      };
+      parsed.meta = { goal: "noop", rationale: "Missing meta", confidence: 0 };
     }
-
     if (!parsed.scope) {
-      parsed.scope = {
-        files: [],
-        total_ops: 0,
-        estimated_bytes_changed: 0,
-      };
+      parsed.scope = { files: [], total_ops: 0, estimated_bytes_changed: 0 };
     }
-
-    if (!Array.isArray(parsed.expected_effects)) {
-      parsed.expected_effects = [];
-    }
-
-    if (!Array.isArray(parsed.ops)) {
-      parsed.ops = [];
-    }
-
-    if (!parsed.verification) {
-      parsed.verification = { steps: [], success_criteria: [] };
-    }
-
-    if (!Array.isArray(parsed.verification.steps)) {
-      parsed.verification.steps = [];
-    }
-
-    if (!Array.isArray(parsed.verification.success_criteria)) {
+    if (!Array.isArray(parsed.expected_effects)) parsed.expected_effects = [];
+    if (!Array.isArray(parsed.ops)) parsed.ops = [];
+    if (!parsed.verification) parsed.verification = { steps: [], success_criteria: [] };
+    if (!Array.isArray(parsed.verification.steps)) parsed.verification.steps = [];
+    if (!Array.isArray(parsed.verification.success_criteria))
       parsed.verification.success_criteria = [];
-    }
 
-    // Final consistency
     if (parsed.ops.length > 0 && parsed.scope.total_ops === 0) {
       parsed.scope.total_ops = parsed.ops.length;
     }
