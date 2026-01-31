@@ -14,7 +14,6 @@ import { PatchExecutor } from "./PatchExecutor.js";
 export class Agent {
   private cfg: AgentConfig;
   private planner: ReturnType<typeof createPlanner>;
-
   private artifactsAbsDir: string;
 
   private pendingPlan: PatchPlan | null = null;
@@ -32,22 +31,22 @@ export class Agent {
     fs.mkdir(this.artifactsAbsDir, { recursive: true }).catch(() => {});
   }
 
-  // -------------------------
-  // Repo routing (THE KEY)
-  // -------------------------
+  // --------------------------------------------------
+  // ACTIVE REPO SELECTION (single source of truth)
+  // --------------------------------------------------
   private resolveActiveRepo(mode: string) {
     if (mode === "self_improve") {
       return {
-        root: this.cfg.repoRoot,
+        root: this.cfg.repoRoot, // tools/repo-agent
         git: new GitService(this.cfg.repoRoot),
-        allowedPrefix: "tools/repo-agent/",
+        allowedRoot: this.cfg.repoRoot,
       };
     }
 
     return {
-      root: this.cfg.targetRepoRoot,
+      root: this.cfg.targetRepoRoot, // src/
       git: new GitService(this.cfg.targetRepoRoot),
-      allowedPrefix: "",
+      allowedRoot: this.cfg.targetRepoRoot,
     };
   }
 
@@ -77,9 +76,9 @@ export class Agent {
     this.pendingPlanId = null;
   }
 
-  // -------------------------
+  // --------------------------------------------------
   // PLAN PHASE
-  // -------------------------
+  // --------------------------------------------------
   async run(mode: string, reason: string | null) {
     const planId = `plan_${Date.now()}`;
     const active = this.resolveActiveRepo(mode);
@@ -117,24 +116,21 @@ export class Agent {
       filesPreview: ctx.files,
     })) as PatchPlan;
 
-    // -------------------------
-    // HARD SCOPE ENFORCEMENT
-    // -------------------------
-    if (mode === "self_improve") {
-      for (const op of plan.ops) {
-        if (!op.file.startsWith("tools/repo-agent/")) {
-          throw new Error(
-            `self_improve plans may only modify tools/repo-agent/** (found: ${op.file})`
-          );
-        }
+    // --------------------------------------------------
+    // HARD SCOPE ENFORCEMENT (REPO-ROOT RELATIVE)
+    // --------------------------------------------------
+    for (const op of plan.ops) {
+      if (op.file.startsWith("/") || op.file.includes("..")) {
+        throw new Error(`Invalid patch path: ${op.file}`);
       }
-    } else {
-      for (const op of plan.ops) {
-        if (op.file.startsWith("tools/repo-agent/")) {
-          throw new Error(
-            `Non-self_improve modes may NOT modify repo-agent files (${op.file})`
-          );
-        }
+
+      // Resolve path *as the executor will*
+      const resolved = new URL(op.file, `file://${active.root}/`).pathname;
+
+      if (!resolved.startsWith(active.allowedRoot)) {
+        throw new Error(
+          `Patch escapes active repo root (${mode}): ${op.file}`
+        );
       }
     }
 
@@ -144,9 +140,9 @@ export class Agent {
     return { planId, patchPlan: plan };
   }
 
-  // -------------------------
+  // --------------------------------------------------
   // EXECUTION PHASE
-  // -------------------------
+  // --------------------------------------------------
   async executeApprovedPlan() {
     if (!this.pendingPlan || !this.pendingPlanId) {
       throw new Error("No pending plan.");
@@ -158,12 +154,15 @@ export class Agent {
     const branch = `agent/${this.pendingPlanId}`;
     const git = new GitService(active.root);
 
+    // Capture HEAD BEFORE branch creation
+    const headBefore = await git.getHeadSha();
+
     await git.createBranch(branch);
 
     const executor = new PatchExecutor({ repoRoot: active.root });
     await executor.applyAll(this.pendingPlan.ops);
 
-    const diffNames = await git.diffNameStatus("HEAD");
+    const diffNames = await git.diffNameStatus(headBefore);
     if (!diffNames.trim()) {
       throw new Error("Execution produced no changes.");
     }
@@ -172,7 +171,7 @@ export class Agent {
       `agent: ${this.pendingPlan.meta?.goal ?? "apply"} (${this.pendingPlanId})`
     );
 
-    const diffFull = await git.diffUnified("HEAD", 400_000);
+    const diffFull = await git.diffUnified(headBefore, 400_000);
     const diffSnippet =
       diffFull.length > 1800
         ? diffFull.slice(0, 1800) + "\n…TRUNCATED…"
