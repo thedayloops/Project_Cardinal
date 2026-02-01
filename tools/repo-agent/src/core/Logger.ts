@@ -8,8 +8,8 @@ export class Logger {
   // Avoid hard dependency on Node typings
   private pidTag() {
     const pid =
-      typeof process !== "undefined" && typeof process.pid === "number"
-        ? process.pid
+      typeof process !== "undefined" && typeof (process as any).pid === "number"
+        ? (process as any).pid
         : "unknown";
     return `[pid:${pid}]`;
   }
@@ -58,4 +58,10 @@ export class Logger {
 // modules to use a shared logger without changing existing usages of the
 // Logger class. This is additive and fully reversible.
 export type LogLevel = "debug" | "info" | "warn" | "error";
+
+// New: export the intended default log level as a small, documented constant.
+// This is additive and safe — consumers can reference this to determine
+// how the project intends to be operated without changing runtime behavior.
+export const defaultLogLevel: LogLevel = "debug";
+
 export const defaultLogger = new Logger();
