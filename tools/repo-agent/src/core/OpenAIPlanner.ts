@@ -174,6 +174,11 @@ export class OpenAIPlanner implements IPlanner {
       "- forward-slash paths only",
       "- minimal, low-risk changes",
       "- reversible defaults to true",
+      // SELF_IMPROVE guidance — keep concise and conservative
+      "SELF_IMPROVE MODE:",
+      "- You may modify tools/repo-agent/**",
+      "- Prioritize safety, correctness, and auditability",
+      "- Avoid breaking public APIs",
     ];
 
     const payload = {
