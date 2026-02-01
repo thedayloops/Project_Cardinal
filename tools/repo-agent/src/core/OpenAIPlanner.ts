@@ -107,7 +107,9 @@ function normalizePlan(parsed: any): PatchPlanLike {
       start_line: startLine,
       end_line: endLine,
       patch: safeString(o?.patch, ""),
-      reversible: o?.reversible === true, // if missing/false, Guardrails will reject (intentional)
+      // Default reversible to true when the planner omits the field. This keeps
+      // backwards compatibility with older planners that didn't emit reversible.
+      reversible: o?.reversible !== false,
       before_summary: safeString(o?.before_summary, ""),
       after_summary: safeString(o?.after_summary, ""),
     });
