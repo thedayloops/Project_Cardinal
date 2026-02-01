@@ -2,7 +2,7 @@ import path from "node:path";
 
 export type AgentConfig = {
   // Roots
-  repoRoot: string;         // repo-agent root
+  repoRoot: string;  // repo-agent root
   targetRepoRoot: string;   // simulator / target repo root
 
   // Artifacts
@@ -65,8 +65,8 @@ export function loadConfig(): AgentConfig {
 
   const targetRepoRoot =
     process.env.AGENT_TARGET_REPO_ROOT
-      ? path.resolve(process.env.AGENT_TARGET_REPO_ROOT)
-      : repoRoot; // safe default until you point it at the simulator
+    ? path.resolve(process.env.AGENT_TARGET_REPO_ROOT)
+    : repoRoot; // safe default until you point it at the simulator
 
   return {
     repoRoot,
@@ -82,8 +82,10 @@ export function loadConfig(): AgentConfig {
 
     openai: {
       apiKey: process.env.OPENAI_API_KEY ?? "",
-      model: process.env.OPENAI_MODEL ?? "gpt-5-mini",
-      patchModel: process.env.OPENAI_MODEL_PATCH ?? "gpt-5",
+      // Use a safer, current default model identifier when env is not set.
+      model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
+      // Use a conservative default for patching/modeling tasks.
+      patchModel: process.env.OPENAI_MODEL_PATCH ?? "gpt-4o",
     },
 
     planner: {
