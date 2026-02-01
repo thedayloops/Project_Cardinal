@@ -21,6 +21,6 @@ export async function execute(interaction: CommandInteraction) {
       `✅ Merged \`${result.mergedBranch}\` into \`main\``
     );
   } catch (err: any) {
-    await interaction.editReply(`❌ Merge failed: ${err.message}`);
+    await interaction.editReply(`❌ Merge failed: ${err?.message ?? String(err)}`);
   }
 }

@@ -1,4 +1,6 @@
+// tools/repo-agent/src/core/Agent.ts
 import fs from "node:fs/promises";
+import path from "node:path";
 import simpleGit from "simple-git";
 
 import { ContextBuilder, type Trigger } from "./ContextBuilder.js";
@@ -10,6 +12,11 @@ import { loadLedger, type Ledger } from "../util/tokenLedger.js";
 import { resolveArtifactsDirAbs } from "../util/artifactsDir.js";
 import { PatchExecutor } from "./PatchExecutor.js";
 
+type LastBranchState = {
+  branch: string;
+  at: string;
+};
+
 export class Agent {
   private cfg: AgentConfig;
   private planner: ReturnType<typeof createPlanner>;
@@ -18,14 +25,13 @@ export class Agent {
   private pendingPlan: PatchPlan | null = null;
   private pendingPlanId: string | null = null;
 
+  private lastAgentBranch: string | null = null;
+
   constructor(cfg: AgentConfig) {
     this.cfg = cfg;
     this.planner = createPlanner(cfg);
 
-    this.artifactsAbsDir = resolveArtifactsDirAbs(
-      cfg.repoRoot,
-      cfg.artifactsDir
-    );
+    this.artifactsAbsDir = resolveArtifactsDirAbs(cfg.repoRoot, cfg.artifactsDir);
 
     fs.mkdir(this.artifactsAbsDir, { recursive: true }).catch(() => {});
   }
@@ -44,12 +50,41 @@ export class Agent {
     };
   }
 
+  private lastBranchFile(): string {
+    return path.join(this.artifactsAbsDir, "last_agent_branch.json");
+  }
+
+  private async writeLastAgentBranch(state: LastBranchState) {
+    await fs.mkdir(this.artifactsAbsDir, { recursive: true });
+    await fs.writeFile(this.lastBranchFile(), JSON.stringify(state, null, 2), "utf8");
+  }
+
+  private async readLastAgentBranch(): Promise<string> {
+    const raw = await fs.readFile(this.lastBranchFile(), "utf8");
+    const parsed = JSON.parse(raw) as LastBranchState;
+    if (!parsed?.branch) throw new Error("Invalid last_agent_branch.json");
+    return parsed.branch;
+  }
+
+  private async clearLastAgentBranch() {
+    await fs.rm(this.lastBranchFile(), { force: true });
+  }
+
   async getStatus() {
+    if (!this.lastAgentBranch) {
+      this.lastAgentBranch = await this.readLastAgentBranch().catch(() => null);
+    }
+
     return {
       online: true,
+      llm_enabled: this.cfg.enableLLM,
+      planning_model: this.cfg.openai.model,
+      patch_model: this.cfg.openai.patchModel,
+      repoRoot: this.cfg.repoRoot,
+      targetRepoRoot: this.cfg.targetRepoRoot,
       pending_plan: Boolean(this.pendingPlan),
-      repo_agent_root: this.cfg.repoRoot,
-      target_repo_root: this.cfg.targetRepoRoot,
+      pending_plan_id: this.pendingPlanId,
+      last_agent_branch: this.lastAgentBranch,
     };
   }
 
@@ -157,6 +192,10 @@ export class Agent {
       `agent: ${this.pendingPlan.meta?.goal ?? "apply"} (${this.pendingPlanId})`
     );
 
+    // Persist last executed agent branch for /agent_merge after restart
+    this.lastAgentBranch = branch;
+    await this.writeLastAgentBranch({ branch, at: new Date().toISOString() });
+
     const diffNames = await gitSvc.diffNameStatus(headBefore);
     const diffFull = await gitSvc.diffUnified(headBefore, 400_000);
 
@@ -177,14 +216,17 @@ export class Agent {
   }
 
   // -------------------------
-  // NEW: MERGE COMMAND
+  // MERGE COMMAND (restart-safe)
   // -------------------------
   async mergeLastAgentBranch() {
-    if (!this.pendingPlanId) {
+    if (!this.lastAgentBranch) {
+      this.lastAgentBranch = await this.readLastAgentBranch().catch(() => null);
+    }
+    if (!this.lastAgentBranch) {
       throw new Error("No agent branch available to merge.");
     }
 
-    const branch = `agent/${this.pendingPlanId}`;
+    const branch = this.lastAgentBranch;
     const git = new GitService(this.cfg.repoRoot);
 
     const status = await git.status();
@@ -199,7 +241,7 @@ export class Agent {
   }
 
   // -------------------------
-  // NEW: CLEANUP COMMAND
+  // CLEANUP COMMAND
   // -------------------------
   async cleanupAgentBranches() {
     const git = new GitService(this.cfg.repoRoot);
@@ -212,6 +254,9 @@ export class Agent {
     for (const branch of toDelete) {
       await git.deleteBranch(branch, true);
     }
+
+    this.lastAgentBranch = null;
+    await this.clearLastAgentBranch().catch(() => {});
 
     return { deleted: toDelete };
   }

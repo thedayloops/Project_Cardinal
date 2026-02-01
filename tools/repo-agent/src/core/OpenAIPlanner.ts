@@ -56,7 +56,10 @@ function normalizePlan(parsed: any): PatchPlanLike {
   const plan: PatchPlanLike = {
     meta: {
       goal: safeString(parsed?.meta?.goal, "noop"),
-      rationale: safeString(parsed?.meta?.rationale, "Planner returned no rationale."),
+      rationale: safeString(
+        parsed?.meta?.rationale,
+        "Planner returned no rationale."
+      ),
       confidence: toNumber(parsed?.meta?.confidence, 0),
     },
     scope: {
@@ -85,7 +88,9 @@ function normalizePlan(parsed: any): PatchPlanLike {
 
     // For file ops, end_line should be null; for range ops it must be a number.
     let endLine: number | null =
-      o?.end_line === undefined || o?.end_line === null ? null : toNumber(o.end_line, null as any);
+      o?.end_line === undefined || o?.end_line === null
+        ? null
+        : toNumber(o.end_line, null as any);
 
     // If planner accidentally emits 0/undefined for file ops, force the safe shape.
     if (type === "create_file" || type === "update_file") {
@@ -158,7 +163,7 @@ export class OpenAIPlanner implements IPlanner {
 
     const system = systemParts.join(" ");
 
-    // Keep payload lean (your Agent/ContextBuilder should already be capping files/chars)
+    // Keep payload lean
     const payload = {
       mode: input.mode,
       reason: input.reason ?? null,
@@ -176,7 +181,7 @@ export class OpenAIPlanner implements IPlanner {
       text: { format: { type: "json_object" } },
     });
 
-    // Token ledger: record if usage is present; no-op if missing
+    // Token ledger
     try {
       const u = (res as any)?.usage;
       if (u) {
@@ -200,13 +205,13 @@ export class OpenAIPlanner implements IPlanner {
     try {
       parsed = JSON.parse(raw);
     } catch (err: any) {
-      const preview = raw.length > 1200 ? raw.slice(0, 1200) + "\n…TRUNCATED…" : raw;
+      const preview =
+        raw.length > 1200 ? raw.slice(0, 1200) + "\n…TRUNCATED…" : raw;
       throw new Error(
         `Planner returned invalid JSON.\n\n${String(err)}\n\nRaw preview:\n${preview}`
       );
     }
 
-    const normalized = normalizePlan(parsed);
-    return normalized;
+    return normalizePlan(parsed);
   }
 }

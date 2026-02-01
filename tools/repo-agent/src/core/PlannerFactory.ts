@@ -29,9 +29,10 @@ export function createPlanner(cfg: AgentConfig): IPlanner {
 
   const artifactsDirAbs = resolveArtifactsDirAbs(cfg.repoRoot, cfg.artifactsDir);
 
+  // NOTE: Config.openai shape in your repo is { apiKey, model, patchModel }
   return new OpenAIPlanner({
     apiKey: cfg.openai.apiKey,
-    planningModel: cfg.openai.model,
+    planningModel: cfg.openai.model,      // ✅ correct
     patchModel: cfg.openai.patchModel,
     artifactsDir: artifactsDirAbs,
   });

@@ -68,7 +68,10 @@ export async function loadLedger(dirAbs: string): Promise<Ledger> {
   };
 }
 
-export async function recordTokenCall(dirAbs: string, call: TokenCall): Promise<Ledger> {
+export async function recordTokenCall(
+  dirAbs: string,
+  call: TokenCall
+): Promise<Ledger> {
   const abs = resolveDir(dirAbs);
   await ensureDir(abs);
 
@@ -80,7 +83,7 @@ export async function recordTokenCall(dirAbs: string, call: TokenCall): Promise<
   ledger.tokens.total += call.totalTokens;
   ledger.history.push(call);
 
-  await fs.writeFile(ledgerPath(abs), JSON.stringify(ledger, null, 2));
+  await fs.writeFile(ledgerPath(abs), JSON.stringify(ledger, null, 2), "utf8");
 
   return ledger;
 }

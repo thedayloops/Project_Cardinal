@@ -6,7 +6,7 @@ import { loadConfig } from "../core/Config.js";
 
 export const data = new SlashCommandBuilder()
   .setName("agent_cleanup")
-  .setDescription("Delete all local agent/* branches (keeps main)");
+  .setDescription("Delete all local agent/* branches (excluding main)");
 
 export async function execute(interaction: CommandInteraction) {
   await interaction.deferReply();
@@ -18,15 +18,14 @@ export async function execute(interaction: CommandInteraction) {
     const result = await agent.cleanupAgentBranches();
 
     if (result.deleted.length === 0) {
-      await interaction.editReply("🧹 No agent branches to delete.");
+      await interaction.editReply("Nothing to clean.");
       return;
     }
 
     await interaction.editReply(
-      `🧹 Deleted branches:\n` +
-        result.deleted.map((b: string) => `• \`${b}\``).join("\n")
+      `🧹 Deleted:\n${result.deleted.map((b) => `• ${b}`).join("\n")}`
     );
   } catch (err: any) {
-    await interaction.editReply(`❌ Cleanup failed: ${err.message}`);
+    await interaction.editReply(`❌ Cleanup failed: ${err?.message ?? String(err)}`);
   }
 }
