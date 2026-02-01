@@ -3,16 +3,9 @@
 import OpenAI from "openai";
 import type { IPlanner, PlannerInput } from "./PlannerFactory.js";
 import { recordTokenCall, type TokenCall } from "../util/tokenLedger.js";
-import { defaultLogger } from "./Logger.js";
-import path from "node:path";
 
-// Runtime shape normalized into PatchPlan expectations
 type PatchPlanLike = {
-  meta: {
-    goal: string;
-    rationale: string;
-    confidence: number;
-  };
+  meta: { goal: string; rationale: string; confidence: number };
   scope: {
     files: string[];
     total_ops: number;
@@ -35,10 +28,7 @@ type PatchPlanLike = {
     before_summary: string;
     after_summary: string;
   }>;
-  verification: {
-    steps: string[];
-    success_criteria: string[];
-  };
+  verification: { steps: string[]; success_criteria: string[] };
 };
 
 type OpenAIPlannerOpts = {
@@ -48,22 +38,13 @@ type OpenAIPlannerOpts = {
   artifactsDir: string;
 };
 
-/* ----------------------------- */
-/* Helpers */
-/* ----------------------------- */
-
 function safeString(v: unknown, fallback = ""): string {
   return typeof v === "string" ? v : fallback;
 }
 
-function toNumber(v: unknown): number | null {
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-function clamp01(n: number): number {
-  return Math.max(0, Math.min(1, n));
+function toNumber(v: unknown, fallback: number): number {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 function asStringArray(v: unknown): string[] {
@@ -71,33 +52,17 @@ function asStringArray(v: unknown): string[] {
   return v.map((x) => safeString(x)).filter(Boolean);
 }
 
-function normalizePath(p: unknown): string {
-  return safeString(p).replace(/\\/g, "/");
-}
-
-/* ----------------------------- */
-/* Normalization */
-/* ----------------------------- */
-
 function normalizePlan(parsed: any): PatchPlanLike {
-  // ----- Confidence normalization (CRITICAL FIX)
-  let confidenceRaw = toNumber(parsed?.meta?.confidence);
-  if (confidenceRaw === null) confidenceRaw = 0.5; // neutral default
-  const confidence = clamp01(confidenceRaw);
-
   const plan: PatchPlanLike = {
     meta: {
       goal: safeString(parsed?.meta?.goal, "noop"),
-      rationale: safeString(
-        parsed?.meta?.rationale,
-        "Planner returned no rationale."
-      ),
-      confidence,
+      rationale: safeString(parsed?.meta?.rationale, ""),
+      confidence: toNumber(parsed?.meta?.confidence, 0),
     },
     scope: {
       files: asStringArray(parsed?.scope?.files),
-      total_ops: 0,
-      estimated_bytes_changed: toNumber(parsed?.scope?.estimated_bytes_changed) ?? 0,
+      total_ops: toNumber(parsed?.scope?.total_ops, 0),
+      estimated_bytes_changed: toNumber(parsed?.scope?.estimated_bytes_changed, 0),
     },
     expected_effects: asStringArray(parsed?.expected_effects),
     ops: [],
@@ -110,48 +75,40 @@ function normalizePlan(parsed: any): PatchPlanLike {
   const rawOps = Array.isArray(parsed?.ops) ? parsed.ops : [];
 
   for (const o of rawOps) {
-    const type = safeString(o?.type) as PatchPlanLike["ops"][number]["type"];
+    let file = safeString(o?.file).replace(/\\/g, "/");
 
-    const file = normalizePath(o?.file);
-
-    let startLine = toNumber(o?.start_line) ?? 1;
-    if (startLine < 1) startLine = 1;
-
-    let endLine: number | null = null;
-    if (o?.end_line !== undefined && o?.end_line !== null) {
-      endLine = toNumber(o.end_line) ?? startLine;
-      if (endLine < startLine) endLine = startLine;
+    // 🔧 Normalize repo-agent paths
+    if (file.startsWith("tools/repo-agent/")) {
+      file = file.replace(/^tools\/repo-agent\//, "");
     }
 
-    if (type === "create_file" || type === "update_file") {
+    let startLine = Math.max(1, toNumber(o?.start_line, 1));
+    let endLine: number | null =
+      o?.end_line == null ? null : Math.max(startLine, toNumber(o.end_line, startLine));
+
+    if (o?.type === "create_file" || o?.type === "update_file") {
       endLine = null;
     }
 
     plan.ops.push({
       id: safeString(o?.id, `op_${plan.ops.length + 1}`),
-      type,
+      type: o?.type,
       file,
       start_line: startLine,
       end_line: endLine,
-      patch: safeString(o?.patch),
+      patch: safeString(o?.patch, ""),
       reversible: o?.reversible !== false,
-      before_summary: safeString(o?.before_summary),
-      after_summary: safeString(o?.after_summary),
+      before_summary: safeString(o?.before_summary, ""),
+      after_summary: safeString(o?.after_summary, ""),
     });
   }
 
-  plan.scope.total_ops = plan.ops.length;
-
-  if (plan.scope.files.length === 0 && plan.ops.length > 0) {
-    plan.scope.files = Array.from(new Set(plan.ops.map((x) => x.file)));
-  }
+  if (!plan.scope.total_ops) plan.scope.total_ops = plan.ops.length;
+  if (!plan.scope.files.length)
+    plan.scope.files = [...new Set(plan.ops.map((o) => o.file))];
 
   return plan;
 }
-
-/* ----------------------------- */
-/* Planner */
-/* ----------------------------- */
 
 export class OpenAIPlanner implements IPlanner {
   private client: OpenAI;
@@ -164,108 +121,32 @@ export class OpenAIPlanner implements IPlanner {
   }
 
   async planPatch(input: PlannerInput) {
-    const systemParts = [
-      "You are a repository planning agent.",
-      "Return ONLY a single valid JSON object.",
-      "It MUST match the PatchPlan schema exactly.",
-      "Rules:",
-      "- start_line >= 1",
-      "- create_file/update_file => end_line = null",
-      "- replace_range/delete_range => end_line >= start_line",
-      "- forward-slash paths only",
-      "- minimal, low-risk changes",
-      "- reversible defaults to true",
-      // SELF_IMPROVE guidance — keep concise and conservative
-      "SELF_IMPROVE MODE:",
-      "- You may modify tools/repo-agent/**",
-      "- Prioritize safety, correctness, and auditability",
-      "- Avoid breaking public APIs",
-    ];
-
-    const payload = {
-      mode: input.mode,
-      reason: input.reason ?? null,
-      repo: input.repo,
-      scope: input.scope,
-      filesPreview: input.filesPreview,
-    };
-
     const res = await this.client.responses.create({
       model: this.opts.planningModel,
       input: [
-        { role: "system", content: systemParts.join(" ") },
-        { role: "user", content: JSON.stringify(payload) },
+        { role: "system", content: "Return only valid JSON PatchPlan." },
+        { role: "user", content: JSON.stringify(input) },
       ],
       text: { format: { type: "json_object" } },
     });
 
-    /* ---- Token ledger (never fatal) ---- */
     try {
       const u = (res as any)?.usage;
       if (u) {
         const call: TokenCall = {
           at: new Date().toISOString(),
           model: this.opts.planningModel,
-          inputTokens: Number(u.input_tokens ?? 0),
-          outputTokens: Number(u.output_tokens ?? 0),
-          totalTokens: Number(u.total_tokens ?? 0),
+          inputTokens: u.input_tokens ?? 0,
+          outputTokens: u.output_tokens ?? 0,
+          totalTokens: u.total_tokens ?? 0,
         };
         await recordTokenCall(this.opts.artifactsDir, call);
       }
-    } catch (err) {
-      // ledger failures must NEVER block planning
-      // Log a non-fatal warning to aid observability while keeping behavior unchanged.
-      try {
-        defaultLogger.warn("Failed to record token call", err);
-      } catch {
-        // Ensure logging failures never throw
-      }
-    }
+    } catch {}
 
-    const raw = (res as any)?.output_text?.trim();
+    const raw = (res as any)?.output_text;
     if (!raw) throw new Error("Planner returned no output");
 
-    let parsed: any;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (err: any) {
-      throw new Error(
-        `Planner returned invalid JSON:\n${String(err)}\n\nPreview:\n${raw.slice(
-          0,
-          1200
-        )}`
-      );
-    }
-
-    return normalizePlan(parsed);
-  }
-
-  // Add a minimal, safe planFiles implementation to satisfy the IPlanner
-  // interface and provide a conservative file list for callers that rely
-  // on planFiles. This method is intentionally non-destructive and returns
-  // file paths discovered in the preview/context when available.
-  async planFiles(ctx: any) {
-    try {
-      const files: string[] = [];
-
-      // Prefer filesPreview (PlannerFactory may pass this), fall back to ctx.files
-      if (Array.isArray(ctx?.filesPreview)) {
-        for (const f of ctx.filesPreview) {
-          if (f && typeof f.path === "string") files.push(f.path);
-        }
-      } else if (Array.isArray(ctx?.files)) {
-        for (const f of ctx.files) {
-          if (f && typeof f.path === "string") files.push(f.path);
-        }
-      }
-
-      return { intent: "Return candidate files from preview", files };
-    } catch (err) {
-      // Never throw from this helper to avoid breaking callers — return an empty safe result.
-      try {
-        defaultLogger.debug("OpenAIPlanner.planFiles encountered an error", err);
-      } catch {}
-      return { intent: "error", files: [] };
-    }
+    return normalizePlan(JSON.parse(raw));
   }
 }

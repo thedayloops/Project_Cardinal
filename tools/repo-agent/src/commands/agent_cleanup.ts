@@ -1,4 +1,6 @@
-import type { ChatInputCommandInteraction } from "discord.js";
+// tools/repo-agent/src/commands/agent_cleanup.ts
+
+import { ChatInputCommandInteraction } from "discord.js";
 import { Agent } from "../core/Agent.js";
 
 export async function agentCleanup(
@@ -9,19 +11,15 @@ export async function agentCleanup(
 
   try {
     const result = await agent.cleanupAgentBranches();
-    const deleted: string[] = result.deleted;
+    const deleted =
+      result.deleted.length > 0 ? result.deleted.join("\n") : "(none)";
 
-    const msg =
-      deleted.length === 0
-        ? "No agent branches found."
-        : "Deleted branches:\n" + deleted.map((b) => `• ${b}`).join("\n");
-
-    await interaction.editReply({ content: msg });
-  } catch (err) {
-    await interaction.editReply({
-      content:
-        "❌ Cleanup failed:\n" +
-        (err instanceof Error ? err.message : "Unknown error"),
-    });
+    await interaction.editReply(
+      `🧹 Cleanup complete\nDeleted branches:\n${deleted}`
+    );
+  } catch (err: any) {
+    await interaction.editReply(
+      `❌ Cleanup failed:\n${err?.message ?? String(err)}`
+    );
   }
 }

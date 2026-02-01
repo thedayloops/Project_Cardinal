@@ -1,20 +1,6 @@
 // tools/repo-agent/src/index.ts
 
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import dotenv from "dotenv";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// dist → repo-agent → tools → PROJECT ROOT
-const projectRoot = path.resolve(__dirname, "../../../");
-
-// 🔑 Load ROOT .env explicitly
-dotenv.config({
-  path: path.join(projectRoot, ".env"),
-});
-
+import "dotenv/config";
 import { loadConfig } from "./core/Config.js";
 import { Agent } from "./core/Agent.js";
 import { DiscordBot } from "./integrations/DiscordBot.js";
@@ -22,29 +8,23 @@ import { DiscordBot } from "./integrations/DiscordBot.js";
 async function main() {
   const cfg = loadConfig();
 
-  // LLM safety
   if (cfg.enableLLM && !cfg.openai.apiKey) {
-    console.warn(
-      "⚠️  OPENAI_API_KEY missing — disabling LLM features for this run"
-    );
+    console.warn("⚠️  OPENAI_API_KEY missing — disabling LLM features for this run");
     cfg.enableLLM = false;
   }
 
   const agent = new Agent(cfg);
 
-  const discordToken = process.env.DISCORD_TOKEN;
-
-  if (discordToken && discordToken !== "(omitted)") {
-    const bot = new DiscordBot(agent);
-    await bot.start(discordToken);
-    console.log("✅ Discord bot started");
-  } else {
-    console.warn(
-      "⚠️  DISCORD_TOKEN not set — running agent in headless mode"
-    );
+  if (!process.env.DISCORD_TOKEN) {
+    console.warn("⚠️  DISCORD_TOKEN not set — running agent in headless mode");
+    console.log("✅ Repo Agent initialized");
+    return;
   }
 
-  console.log("✅ Repo Agent initialized");
+  const bot = new DiscordBot(agent);
+  await bot.start(process.env.DISCORD_TOKEN);
+
+  console.log("✅ Repo Agent + Discord bot running");
 }
 
 main().catch((err) => {

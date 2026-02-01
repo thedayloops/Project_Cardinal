@@ -12,6 +12,8 @@ import {
 
 import { Agent } from "../core/Agent.js";
 import { clipText, formatNameStatusList } from "../util/discordText.js";
+import { agentMerge } from "../commands/agent_merge.js";
+import { agentCleanup } from "../commands/agent_cleanup.js";
 
 const SAFE_MAX_CONTENT = 1900;
 
@@ -43,66 +45,68 @@ export class DiscordBot {
     }
   }
 
-  /* -------------------------------------------------- */
-  /* SLASH COMMANDS                                     */
-  /* -------------------------------------------------- */
+  /* ---------------- SLASH COMMANDS ---------------- */
 
   private async handleSlash(interaction: ChatInputCommandInteraction) {
-    if (interaction.commandName === "agent_run") {
-      const mode = interaction.options.getString("mode", true);
-      const reason = interaction.options.getString("reason");
+    switch (interaction.commandName) {
+      case "agent_run": {
+        const mode = interaction.options.getString("mode", true);
+        const reason = interaction.options.getString("reason");
 
-      await interaction.reply("Running agent…");
+        await interaction.reply("Running agent…");
 
-      try {
-        const proposal = await this.agent.run(mode, reason ?? null);
-        const plan = proposal.patchPlan;
+        try {
+          const proposal = await this.agent.run(mode, reason ?? null);
+          const plan = proposal.patchPlan;
 
-        const body = clipText(
-          [
-            "Repo Agent Proposal",
-            `PlanId: ${proposal.planId}`,
-            `Mode: ${mode}`,
-            `Goal: ${plan.meta?.goal ?? "(none)"}`,
-            `Confidence: ${plan.meta?.confidence ?? 0}`,
-            `Files: ${plan.scope?.files?.length ?? 0}`,
-            `Ops: ${plan.ops?.length ?? 0}`,
-          ].join("\n"),
-          SAFE_MAX_CONTENT
-        );
+          const body = clipText(
+            [
+              "Repo Agent Proposal",
+              `PlanId: ${proposal.planId}`,
+              `Mode: ${mode}`,
+              `Goal: ${plan.meta?.goal ?? "(none)"}`,
+              `Confidence: ${plan.meta?.confidence ?? 0}`,
+              `Files: ${plan.scope?.files?.length ?? 0}`,
+              `Ops: ${plan.ops?.length ?? 0}`,
+            ].join("\n"),
+            SAFE_MAX_CONTENT
+          );
 
-        await interaction.editReply({
-          content: body,
-          components: [this.buildButtons()],
-        });
-      } catch (err: any) {
-        await interaction.editReply(
-          "Agent failed:\n" + (err?.message ?? String(err))
-        );
+          await interaction.editReply({
+            content: body,
+            components: [this.buildButtons()],
+          });
+        } catch (err: any) {
+          await interaction.editReply(
+            "Agent failed:\n" + (err?.message ?? String(err))
+          );
+        }
+        return;
       }
-      return;
-    }
 
-    if (interaction.commandName === "agent_status") {
-      await interaction.reply({
-        content: JSON.stringify(await this.agent.getStatus(), null, 2),
-        ephemeral: true,
-      });
-      return;
-    }
+      case "agent_merge":
+        return agentMerge(interaction, this.agent);
 
-    if (interaction.commandName === "agent_tokens") {
-      await interaction.reply({
-        content: JSON.stringify(await this.agent.getTokenStats(), null, 2),
-        ephemeral: true,
-      });
-      return;
+      case "agent_cleanup":
+        return agentCleanup(interaction, this.agent);
+
+      case "agent_status":
+        await interaction.reply({
+          content: JSON.stringify(await this.agent.getStatus(), null, 2),
+          ephemeral: true,
+        });
+        return;
+
+      case "agent_tokens":
+        await interaction.reply({
+          content: JSON.stringify(await this.agent.getTokenStats(), null, 2),
+          ephemeral: true,
+        });
+        return;
     }
   }
 
-  /* -------------------------------------------------- */
-  /* BUTTON HANDLERS                                    */
-  /* -------------------------------------------------- */
+  /* ---------------- BUTTONS ---------------- */
 
   private async handleButton(interaction: Interaction) {
     if (!interaction.isButton()) return;
@@ -146,10 +150,6 @@ export class DiscordBot {
       });
     }
   }
-
-  /* -------------------------------------------------- */
-  /* UI HELPERS                                         */
-  /* -------------------------------------------------- */
 
   private buildButtons() {
     return new ActionRowBuilder<ButtonBuilder>().addComponents(
