@@ -4,15 +4,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 
-// Resolve repo root (two levels up from this file)
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// tools/repo-agent/dist/index.js → tools/repo-agent/dist → tools/repo-agent → PROJECT ROOT
-const repoRoot = path.resolve(__dirname, "../../");
+// dist → repo-agent → tools → PROJECT ROOT
+const projectRoot = path.resolve(__dirname, "../../../");
 
-// Explicitly load root .env
-dotenv.config({ path: path.join(repoRoot, ".env") });
+// 🔑 Load ROOT .env explicitly
+dotenv.config({
+  path: path.join(projectRoot, ".env"),
+});
 
 import { loadConfig } from "./core/Config.js";
 import { Agent } from "./core/Agent.js";
@@ -21,7 +22,7 @@ import { DiscordBot } from "./integrations/DiscordBot.js";
 async function main() {
   const cfg = loadConfig();
 
-  // 🔐 LLM safety
+  // LLM safety
   if (cfg.enableLLM && !cfg.openai.apiKey) {
     console.warn(
       "⚠️  OPENAI_API_KEY missing — disabling LLM features for this run"
