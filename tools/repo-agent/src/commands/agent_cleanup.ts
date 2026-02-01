@@ -1,31 +1,27 @@
-import { SlashCommandBuilder } from "discord.js";
-import type { CommandInteraction } from "discord.js";
-
+import type { ChatInputCommandInteraction } from "discord.js";
 import { Agent } from "../core/Agent.js";
-import { loadConfig } from "../core/Config.js";
 
-export const data = new SlashCommandBuilder()
-  .setName("agent_cleanup")
-  .setDescription("Delete all local agent/* branches (excluding main)");
-
-export async function execute(interaction: CommandInteraction) {
-  await interaction.deferReply();
+export async function agentCleanup(
+  interaction: ChatInputCommandInteraction,
+  agent: Agent
+) {
+  await interaction.reply({ content: "Cleaning up agent branches…", ephemeral: true });
 
   try {
-    const cfg = await loadConfig();
-    const agent = new Agent(cfg);
-
     const result = await agent.cleanupAgentBranches();
+    const deleted: string[] = result.deleted;
 
-    if (result.deleted.length === 0) {
-      await interaction.editReply("Nothing to clean.");
-      return;
-    }
+    const msg =
+      deleted.length === 0
+        ? "No agent branches found."
+        : "Deleted branches:\n" + deleted.map((b) => `• ${b}`).join("\n");
 
-    await interaction.editReply(
-      `🧹 Deleted:\n${result.deleted.map((b) => `• ${b}`).join("\n")}`
-    );
-  } catch (err: any) {
-    await interaction.editReply(`❌ Cleanup failed: ${err?.message ?? String(err)}`);
+    await interaction.editReply({ content: msg });
+  } catch (err) {
+    await interaction.editReply({
+      content:
+        "❌ Cleanup failed:\n" +
+        (err instanceof Error ? err.message : "Unknown error"),
+    });
   }
 }

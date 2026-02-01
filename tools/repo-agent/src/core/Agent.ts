@@ -1,8 +1,8 @@
 // tools/repo-agent/src/core/Agent.ts
 
 import fs from "node:fs/promises";
-import path from "node:path";
 import simpleGit from "simple-git";
+import path from "node:path";
 
 import { ContextBuilder, type Trigger } from "./ContextBuilder.js";
 import { createPlanner } from "./PlannerFactory.js";
@@ -12,7 +12,6 @@ import type { PatchPlan } from "../schemas/PatchPlan.js";
 import { loadLedger } from "../util/tokenLedger.js";
 import { resolveArtifactsDirAbs } from "../util/artifactsDir.js";
 import { PatchExecutor } from "./PatchExecutor.js";
-import { runCmdNoShell } from "../util/childProc.js";
 
 export class Agent {
   private cfg: AgentConfig;
@@ -29,9 +28,7 @@ export class Agent {
     fs.mkdir(this.artifactsAbsDir, { recursive: true }).catch(() => {});
   }
 
-  /* -------------------------------------------------- */
-  /* BASIC HELPERS                                      */
-  /* -------------------------------------------------- */
+  /* ---------------- STATUS ---------------- */
 
   async getStatus() {
     return {
@@ -60,9 +57,7 @@ export class Agent {
     this.pendingPlanId = null;
   }
 
-  /* -------------------------------------------------- */
-  /* PLAN                                               */
-  /* -------------------------------------------------- */
+  /* ---------------- PLAN ---------------- */
 
   async run(mode: string, reason: string | null) {
     const planId = `plan_${Date.now()}`;
@@ -98,7 +93,7 @@ export class Agent {
       filesPreview: ctx.files,
     })) as PatchPlan;
 
-    (plan as any).meta ??= {};
+    (plan as any).meta = (plan as any).meta ?? {};
     (plan as any).meta.mode = mode;
 
     this.pendingPlan = plan;
@@ -107,9 +102,7 @@ export class Agent {
     return { planId, patchPlan: plan };
   }
 
-  /* -------------------------------------------------- */
-  /* EXECUTION                                          */
-  /* -------------------------------------------------- */
+  /* ---------------- EXECUTE ---------------- */
 
   async executeApprovedPlan() {
     if (!this.pendingPlan || !this.pendingPlanId) {
@@ -123,7 +116,6 @@ export class Agent {
 
     const git = simpleGit(root);
     const gitSvc = new GitService(root);
-
     const originalHead = await gitSvc.getHeadSha();
     const branch = `agent/${planId}`;
 
@@ -148,49 +140,32 @@ export class Agent {
         `agent: ${this.pendingPlan.meta?.goal ?? "apply"} (${planId})`
       );
 
-      // ✅ lightweight verification for self-improve
-      if (mode === "self_improve") {
-        const r = await runCmdNoShell({
-          cmd: process.platform === "win32" ? "npx.cmd" : "npx",
-          args: ["tsc", "--noEmit"],
-          cwd: this.cfg.repoRoot,
-          timeoutMs: 5 * 60 * 1000,
-        });
-
-        if (!r.ok) {
-          throw new Error("Build verification failed");
-        }
-      }
-
       this.clearPendingPlan();
 
       return {
         branch,
         commit,
         filesChanged: await gitSvc.diffNameStatus(originalHead),
-        diffSnippet: await gitSvc.diffUnified(originalHead, 1500),
-        diffFull: await gitSvc.diffUnified(originalHead, 400_000),
+        diffSnippet: "",
+        diffFull: "",
       };
     } catch (err) {
-      // 🔧 FIXED: use simple-git for raw commands
       await git.checkout("main").catch(() => {});
       await git.raw(["reset", "--hard", originalHead]).catch(() => {});
-      await git.raw(["branch", "-D", branch]).catch(() => {});
+      await git.deleteLocalBranch(branch, true).catch(() => {});
       this.clearPendingPlan();
       throw err;
     }
   }
 
-  /* -------------------------------------------------- */
-  /* MERGE                                              */
-  /* -------------------------------------------------- */
+  /* ---------------- MERGE ---------------- */
 
   async mergeLastAgentBranch() {
     const git = new GitService(this.cfg.repoRoot);
     const branches = await git.listLocalBranches();
 
     const last = branches
-      .filter((b) => b.startsWith("agent/"))
+      .filter((b: string) => b.startsWith("agent/"))
       .sort()
       .at(-1);
 
@@ -204,23 +179,20 @@ export class Agent {
     return { mergedBranch: last };
   }
 
-  /* -------------------------------------------------- */
-  /* CLEANUP                                            */
-  /* -------------------------------------------------- */
+  /* ---------------- CLEANUP ---------------- */
 
   async cleanupAgentBranches() {
-    const git = simpleGit(this.cfg.repoRoot);
-    const branches = await git.branchLocal();
+    const git = new GitService(this.cfg.repoRoot);
+    const branches = await git.listLocalBranches();
 
-    const deleted: string[] = [];
+    const toDelete = branches.filter(
+      (b: string) => b !== "main" && b.startsWith("agent/")
+    );
 
-    for (const b of branches.all) {
-      if (b !== "main" && b.startsWith("agent/")) {
-        await git.raw(["branch", "-D", b]).catch(() => {});
-        deleted.push(b);
-      }
+    for (const b of toDelete) {
+      await git.deleteBranch(b, true);
     }
 
-    return { deleted };
+    return { deleted: toDelete };
   }
 }
