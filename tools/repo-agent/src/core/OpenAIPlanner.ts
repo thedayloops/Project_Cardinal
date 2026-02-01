@@ -176,15 +176,6 @@ export class OpenAIPlanner implements IPlanner {
       "- reversible defaults to true",
     ];
 
-    if (input.mode === "self_improve") {
-      systemParts.push(
-        "SELF-IMPROVE MODE:",
-        "- You may modify tools/repo-agent/**",
-        "- Prioritize safety, correctness, and auditability",
-        "- Avoid breaking public APIs"
-      );
-    }
-
     const payload = {
       mode: input.mode,
       reason: input.reason ?? null,
