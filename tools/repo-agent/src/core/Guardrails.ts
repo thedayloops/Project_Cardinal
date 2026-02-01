@@ -48,8 +48,21 @@ export class Guardrails {
   }
 
   private validateOp(op: PatchOp): void {
+    // Normalize to posix for consistent prefix checks (and to tolerate Windows paths)
     const normalized = toPosix(op.file);
 
+    // Reject obviously unsafe or absolute file targets. This prevents directory traversal
+    // and accidental writes outside the repository.
+    if (!normalized || normalized.startsWith("/")) {
+      throw new Error(`Unsafe or absolute path in op: ${op.file}`);
+    }
+    // After normalization, any parent-segments are suspicious for a patch plan.
+    const segments = normalized.split("/");
+    if (segments.includes("..")) {
+      throw new Error(`Path traversal detected in op file path: ${op.file}`);
+    }
+
+    // Deny-list and locked path checks (use normalized prefixes)
     for (const denied of this.cfg.deniedPathPrefixes) {
       const d = toPosix(denied);
       if (d && normalized.startsWith(d)) {
@@ -72,11 +85,11 @@ export class Guardrails {
       throw new Error(`start_line must be >= 1 (op ${op.id})`);
     }
 
-    // Coerce/normalize end_line to be at least start_line for range ops when possible
-    // (helps tolerate occasional LLM output of 0 or a smaller number)
+    // Coerce/validate end_line locally (don't mutate the op object here; callers should
+    // rely on planners to emit correct shapes). This helps tolerate minor numeric issues
+    // while still enforcing the final constraints.
     let endLine = op.end_line;
     if (endLine !== null && typeof endLine === "number" && endLine < op.start_line) {
-      // Coerce to a safe value (start_line). This keeps the op reversible and valid.
       endLine = op.start_line;
     }
 
