@@ -17,7 +17,7 @@ export type GuardrailConfig = {
 // This allows safe, auditable self-improvement of the agent core files
 // while still blocking risky or external integrations from being modified
 // automatically in self_improve mode.
-const SELF_IMPROVE_DENY_PREFIXES = [
+const SELF_IMPROVE_DENY_PREFIXES_RAW = [
   // Deny modifying external integrations and high-risk integration surface
   // in self_improve mode. This is intentionally conservative and can be
   // expanded or relaxed via configuration if needed.
@@ -25,6 +25,10 @@ const SELF_IMPROVE_DENY_PREFIXES = [
   "tools/repo-agent/src/integrations/",
 ];
 
+// Normalize prefixes to POSIX-style to ensure comparisons are consistent
+// regardless of OS path separators. This avoids false negatives when
+// validating ops on Windows vs POSIX systems.
+const SELF_IMPROVE_DENY_PREFIXES = SELF_IMPROVE_DENY_PREFIXES_RAW.map(toPosix);
 
 export class Guardrails {
   constructor(private cfg: GuardrailConfig) {}
