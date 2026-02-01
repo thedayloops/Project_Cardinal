@@ -22,6 +22,7 @@ const SELF_IMPROVE_DENY_PREFIXES = [
   // in self_improve mode. This is intentionally conservative and can be
   // expanded or relaxed via configuration if needed.
   "src/integrations/",
+  "tools/repo-agent/src/integrations/",
 ];
 
 
