@@ -1,4 +1,3 @@
-// tools/repo-agent/src/core/Agent.ts
 import fs from "node:fs/promises";
 import path from "node:path";
 import simpleGit from "simple-git";
@@ -11,13 +10,29 @@ import type { PatchPlan } from "../schemas/PatchPlan.js";
 import { loadLedger, type Ledger } from "../util/tokenLedger.js";
 import { resolveArtifactsDirAbs } from "../util/artifactsDir.js";
 import { PatchExecutor } from "./PatchExecutor.js";
+import { runCmdNoShell } from "../util/childProc.js";
+import { ensureDir, writeFileAtomic, fileExists } from "../util/fsSafe.js";
 
 type LastBranchState = {
   branch: string;
-  at: string;
-  // repoRoot where the branch was created. This makes merge/cleanup restart-safe
-  repoRoot: string;
+  planId: string;
+  atIso: string;
 };
+
+type VerificationState = {
+  branch: string;
+  planId: string;
+  atIso: string;
+  ok: boolean;
+  exitCode: number | null;
+  durationMs: number;
+  stdoutPath: string;
+  stderrPath: string;
+};
+
+function npmCmd(): string {
+  return process.platform === "win32" ? "npm.cmd" : "npm";
+}
 
 export class Agent {
   private cfg: AgentConfig;
@@ -26,9 +41,6 @@ export class Agent {
 
   private pendingPlan: PatchPlan | null = null;
   private pendingPlanId: string | null = null;
-
-  // Now store richer state for the last agent branch (branch + repoRoot + timestamp)
-  private lastAgentBranch: LastBranchState | null = null;
 
   constructor(cfg: AgentConfig) {
     this.cfg = cfg;
@@ -53,44 +65,68 @@ export class Agent {
     };
   }
 
-  private lastBranchFile(): string {
+  private lastBranchFileAbs(): string {
     return path.join(this.artifactsAbsDir, "last_agent_branch.json");
   }
 
-  private async writeLastAgentBranch(state: LastBranchState) {
-    await fs.mkdir(this.artifactsAbsDir, { recursive: true });
-    await fs.writeFile(this.lastBranchFile(), JSON.stringify(state, null, 2), "utf8");
+  private lastVerificationFileAbs(): string {
+    return path.join(this.artifactsAbsDir, "last_agent_verification.json");
   }
 
-  private async readLastAgentBranch(): Promise<LastBranchState> {
-    const raw = await fs.readFile(this.lastBranchFile(), "utf8");
-    const parsed = JSON.parse(raw) as LastBranchState;
-    if (!parsed?.branch) throw new Error("Invalid last_agent_branch.json");
-    // Backwards compatibility: if repoRoot missing, default to cfg.repoRoot
-    if (!parsed.repoRoot) parsed.repoRoot = this.cfg.repoRoot;
-    return parsed;
+  private async writeLastBranch(state: LastBranchState) {
+    await ensureDir(this.artifactsAbsDir);
+    await writeFileAtomic(this.lastBranchFileAbs(), JSON.stringify(state, null, 2));
   }
 
-  private async clearLastAgentBranch() {
-    await fs.rm(this.lastBranchFile(), { force: true });
+  private async readLastBranch(): Promise<LastBranchState | null> {
+    const p = this.lastBranchFileAbs();
+    if (!(await fileExists(p))) return null;
+    const raw = await fs.readFile(p, "utf8");
+    return JSON.parse(raw) as LastBranchState;
+  }
+
+  private async clearLastBranch() {
+    await fs.rm(this.lastBranchFileAbs(), { force: true }).catch(() => {});
+  }
+
+  private async writeLastVerification(state: VerificationState) {
+    await ensureDir(this.artifactsAbsDir);
+    await writeFileAtomic(this.lastVerificationFileAbs(), JSON.stringify(state, null, 2));
+  }
+
+  private async readLastVerification(): Promise<VerificationState | null> {
+    const p = this.lastVerificationFileAbs();
+    if (!(await fileExists(p))) return null;
+    const raw = await fs.readFile(p, "utf8");
+    return JSON.parse(raw) as VerificationState;
+  }
+
+  private async clearLastVerification() {
+    await fs.rm(this.lastVerificationFileAbs(), { force: true }).catch(() => {});
   }
 
   async getStatus() {
-    if (!this.lastAgentBranch) {
-      this.lastAgentBranch = await this.readLastAgentBranch().catch(() => null);
-    }
+    const lastBranch = await this.readLastBranch().catch(() => null);
+    const lastVerify = await this.readLastVerification().catch(() => null);
 
     return {
       online: true,
-      llm_enabled: this.cfg.enableLLM,
-      planning_model: this.cfg.openai.model,
-      patch_model: this.cfg.openai.patchModel,
-      repoRoot: this.cfg.repoRoot,
-      targetRepoRoot: this.cfg.targetRepoRoot,
       pending_plan: Boolean(this.pendingPlan),
       pending_plan_id: this.pendingPlanId,
-      // Keep the public shape the same (string or null)
-      last_agent_branch: this.lastAgentBranch ? this.lastAgentBranch.branch : null,
+      repo_agent_root: this.cfg.repoRoot,
+      target_repo_root: this.cfg.targetRepoRoot,
+      last_agent_branch: lastBranch?.branch ?? null,
+      last_agent_branch_plan_id: lastBranch?.planId ?? null,
+      last_agent_verification: lastVerify
+        ? {
+            ok: lastVerify.ok,
+            planId: lastVerify.planId,
+            branch: lastVerify.branch,
+            atIso: lastVerify.atIso,
+            stdoutPath: lastVerify.stdoutPath,
+            stderrPath: lastVerify.stderrPath,
+          }
+        : null,
     };
   }
 
@@ -163,15 +199,23 @@ export class Agent {
   // -------------------------
   // EXECUTION PHASE
   // -------------------------
-  async executeApprovedPlan() {
+  async executeApprovedPlan(): Promise<{
+    branch: string;
+    commit: string;
+    filesChanged: string;
+    diffSnippet: string;
+    diffFull: string;
+    verification?: VerificationState;
+  }> {
     if (!this.pendingPlan || !this.pendingPlanId) {
       throw new Error("No pending plan.");
     }
 
+    const planId = this.pendingPlanId;
     const mode = (this.pendingPlan as any)?.meta?.mode ?? "unknown";
     const active = this.resolveActiveRepo(mode);
 
-    const branch = `agent/${this.pendingPlanId}`;
+    const branch = `agent/${planId}`;
     const gitSvc = new GitService(active.root);
     const git = simpleGit(active.root);
 
@@ -195,12 +239,15 @@ export class Agent {
     }
 
     const commit = await gitSvc.addAllAndCommit(
-      `agent: ${this.pendingPlan.meta?.goal ?? "apply"} (${this.pendingPlanId})`
+      `agent: ${this.pendingPlan.meta?.goal ?? "apply"} (${planId})`
     );
 
-    // Persist last executed agent branch for /agent_merge after restart
-    this.lastAgentBranch = { branch, at: new Date().toISOString(), repoRoot: active.root };
-    await this.writeLastAgentBranch(this.lastAgentBranch);
+    // Persist last branch (for /agent_merge and /agent_cleanup)
+    await this.writeLastBranch({
+      branch,
+      planId,
+      atIso: new Date().toISOString(),
+    });
 
     const diffNames = await gitSvc.diffNameStatus(headBefore);
     const diffFull = await gitSvc.diffUnified(headBefore, 400_000);
@@ -210,6 +257,14 @@ export class Agent {
         ? diffFull.slice(0, 1800) + "\n…TRUNCATED…"
         : diffFull;
 
+    // NEW: self-improve verification (TypeScript build)
+    let verification: VerificationState | undefined;
+
+    if (active.isSelfImprove) {
+      verification = await this.verifyRepoAgentBuild(planId, branch);
+      await this.writeLastVerification(verification);
+    }
+
     this.clearPendingPlan();
 
     return {
@@ -218,24 +273,64 @@ export class Agent {
       filesChanged: diffNames,
       diffSnippet,
       diffFull,
+      verification,
+    };
+  }
+
+  private async verifyRepoAgentBuild(planId: string, branch: string): Promise<VerificationState> {
+    await ensureDir(this.artifactsAbsDir);
+
+    const stdoutPath = path.join(
+      this.artifactsAbsDir,
+      `verify_build_${planId}_stdout.log`
+    );
+    const stderrPath = path.join(
+      this.artifactsAbsDir,
+      `verify_build_${planId}_stderr.log`
+    );
+
+    const r = await runCmdNoShell({
+      cmd: npmCmd(),
+      args: ["run", "build"],
+      cwd: this.cfg.repoRoot,
+      timeoutMs: 20 * 60 * 1000,
+    });
+
+    await writeFileAtomic(stdoutPath, r.stdout ?? "");
+    await writeFileAtomic(stderrPath, r.stderr ?? "");
+
+    return {
+      branch,
+      planId,
+      atIso: new Date().toISOString(),
+      ok: r.ok,
+      exitCode: r.exitCode,
+      durationMs: r.durationMs,
+      stdoutPath,
+      stderrPath,
     };
   }
 
   // -------------------------
-  // MERGE COMMAND (restart-safe)
+  // MERGE COMMAND (gated by verification)
   // -------------------------
   async mergeLastAgentBranch() {
-    if (!this.lastAgentBranch) {
-      this.lastAgentBranch = await this.readLastAgentBranch().catch(() => null);
-    }
-    if (!this.lastAgentBranch) {
+    const lastBranch = await this.readLastBranch();
+    if (!lastBranch?.branch) {
       throw new Error("No agent branch available to merge.");
     }
 
-    const branch = this.lastAgentBranch.branch;
-    // Use the repoRoot recorded when the branch was created; fallback to cfg.repoRoot
-    const repoRoot = this.lastAgentBranch.repoRoot ?? this.cfg.repoRoot;
-    const git = new GitService(repoRoot);
+    const lastVerify = await this.readLastVerification();
+
+    // Require successful verification for self-improve merges
+    if (!lastVerify || lastVerify.branch !== lastBranch.branch || !lastVerify.ok) {
+      throw new Error(
+        "Last self-improve branch is not verified (npm run build failed or was not run). Fix the branch, then re-run /agent_run self_improve and approve, or re-run build locally and re-execute a verified plan."
+      );
+    }
+
+    const branch = lastBranch.branch;
+    const git = new GitService(this.cfg.repoRoot);
 
     const status = await git.status();
     if (status.files.length > 0) {
@@ -263,8 +358,8 @@ export class Agent {
       await git.deleteBranch(branch, true);
     }
 
-    this.lastAgentBranch = null;
-    await this.clearLastAgentBranch().catch(() => {});
+    await this.clearLastBranch();
+    await this.clearLastVerification();
 
     return { deleted: toDelete };
   }

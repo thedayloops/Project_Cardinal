@@ -35,7 +35,11 @@ export type PatchOp = {
   before_summary: string;
   after_summary: string;
 
-  reversible: true;
+  /**
+   * Runtime guardrails require reversible===true.
+   * This is boolean (not literal) because PatchPlans come from JSON at runtime.
+   */
+  reversible: boolean;
 };
 
 export type PatchPlan = {
@@ -43,6 +47,9 @@ export type PatchPlan = {
     goal: string;
     rationale: string;
     confidence: number;
+    // NOTE: agent annotates meta.mode at runtime
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    [k: string]: any;
   };
 
   scope: {
