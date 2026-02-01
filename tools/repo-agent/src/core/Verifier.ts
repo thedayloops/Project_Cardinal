@@ -18,29 +18,42 @@ export class Verifier {
 
     for (const name of commandNames) {
       const spec = this.allowlist[name];
+      const at = Date.now();
+
+      const outPath = path.join(
+        this.artifactsDir,
+        `verify_${safe(name)}_${at}_stdout.log`
+      );
+      const errPath = path.join(
+        this.artifactsDir,
+        `verify_${safe(name)}_${at}_stderr.log`
+      );
+
       if (!spec) {
+        await writeFileAtomic(outPath, "");
+        await writeFileAtomic(errPath, `Verification command not allowlisted: ${name}`);
         results.push({
           name,
           ok: false,
           exitCode: null,
-          durationMs: 0
+          durationMs: 0,
+          stdoutPath: outPath,
+          stderrPath: errPath,
         });
         continue;
       }
 
       const cwd = path.resolve(this.repoRoot, spec.cwd || "");
-      const outPath = path.join(this.artifactsDir, `verify_${safe(name)}_${Date.now()}_stdout.log`);
-      const errPath = path.join(this.artifactsDir, `verify_${safe(name)}_${Date.now()}_stderr.log`);
 
       const r = await runCmdNoShell({
         cmd: spec.cmd,
         args: spec.args,
         cwd,
-        timeoutMs: 20 * 60 * 1000
+        timeoutMs: 20 * 60 * 1000,
       });
 
-      await writeFileAtomic(outPath, r.stdout);
-      await writeFileAtomic(errPath, r.stderr);
+      await writeFileAtomic(outPath, r.stdout ?? "");
+      await writeFileAtomic(errPath, r.stderr ?? "");
 
       results.push({
         name,
@@ -48,7 +61,7 @@ export class Verifier {
         exitCode: r.exitCode,
         durationMs: r.durationMs,
         stdoutPath: outPath,
-        stderrPath: errPath
+        stderrPath: errPath,
       });
     }
 

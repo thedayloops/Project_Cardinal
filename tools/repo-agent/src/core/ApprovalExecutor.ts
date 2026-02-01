@@ -12,6 +12,11 @@ export type ApprovalExecutionResult = {
   verification?: VerificationResult;
 };
 
+function clip(s: string, max = 1200): string {
+  if (!s) return "";
+  return s.length > max ? s.slice(0, max) + "\n…TRUNCATED…" : s;
+}
+
 export class ApprovalExecutor {
   private git;
 
@@ -43,9 +48,14 @@ export class ApprovalExecutor {
       let verification: VerificationResult | undefined;
 
       if (this.verifier && plan.verification.steps.length > 0) {
-        verification = await this.verifier.run(plan.verification.steps[0]);
+        const key = plan.verification.steps[0];
+        verification = await this.verifier.run(key);
+
         if (!verification.success) {
-          throw new Error("Verification failed");
+          const detail = clip(
+            verification.stderr || verification.stdout || "(no output)"
+          );
+          throw new Error(`Verification failed (${key}):\n${detail}`);
         }
       }
 
@@ -56,9 +66,10 @@ export class ApprovalExecutor {
         committed: true,
         commitSha: commitRes.commit,
         diff: diff || "(no diff)",
-        verification
+        verification,
       };
     } catch (err) {
+      // Hard rollback if anything goes wrong (including verification).
       await this.git.reset(["--hard"]).catch(() => {});
       await this.git.checkout(baseBranch).catch(() => {});
       await this.git.branch(["-D", branch]).catch(() => {});
