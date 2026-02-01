@@ -12,11 +12,19 @@ export type GuardrailConfig = {
   lockedPathPrefixes: string[];
   deniedPathPrefixes: string[];
   maxOps: number;
-  maxTotalPatchBytes: number;
+  // historically named in different places; support both keys for safety
+  maxTotalPatchBytes?: number;
+  maxTotalWriteBytes?: number;
 };
 
 export class Guardrails {
-  constructor(private cfg: GuardrailConfig) {}
+  private maxTotalPatchBytes: number;
+
+  constructor(private cfg: GuardrailConfig) {
+    // Support both names (backwards-compatible with Config.ts which uses maxTotalWriteBytes)
+    this.maxTotalPatchBytes =
+      cfg.maxTotalPatchBytes ?? cfg.maxTotalWriteBytes ?? 300_000;
+  }
 
   validatePatchPlan(plan: PatchPlan): void {
     if (plan.ops.length > this.cfg.maxOps) {
@@ -29,12 +37,12 @@ export class Guardrails {
 
     for (const op of plan.ops) {
       this.validateOp(op);
-      totalPatchBytes += Buffer.byteLength(op.patch, "utf8");
+      totalPatchBytes += Buffer.byteLength(op.patch ?? "", "utf8");
     }
 
-    if (totalPatchBytes > this.cfg.maxTotalPatchBytes) {
+    if (totalPatchBytes > this.maxTotalPatchBytes) {
       throw new Error(
-        `PatchPlan exceeds max patch bytes (${totalPatchBytes} > ${this.cfg.maxTotalPatchBytes})`
+        `PatchPlan exceeds max patch bytes (${totalPatchBytes} > ${this.maxTotalPatchBytes})`
       );
     }
   }
@@ -64,14 +72,21 @@ export class Guardrails {
       throw new Error(`start_line must be >= 1 (op ${op.id})`);
     }
 
-    if (op.end_line !== null && op.end_line < op.start_line) {
-      throw new Error(`end_line must be >= start_line (op ${op.id})`);
+    // Coerce/normalize end_line to be at least start_line for range ops when possible
+    // (helps tolerate occasional LLM output of 0 or a smaller number)
+    let endLine = op.end_line;
+    if (endLine !== null && typeof endLine === "number" && endLine < op.start_line) {
+      // Coerce to a safe value (start_line). This keeps the op reversible and valid.
+      endLine = op.start_line;
     }
 
     switch (op.type) {
       case "replace_range":
-        if (op.end_line === null) {
+        if (endLine === null) {
           throw new Error(`replace_range requires end_line (op ${op.id})`);
+        }
+        if (endLine < op.start_line) {
+          throw new Error(`replace_range end_line must be >= start_line (op ${op.id})`);
         }
         return;
 
@@ -82,10 +97,13 @@ export class Guardrails {
         return;
 
       case "delete_range":
-        if (op.end_line === null) {
+        if (endLine === null) {
           throw new Error(`delete_range requires end_line (op ${op.id})`);
         }
-        if (op.patch.trim().length > 0) {
+        if (endLine < op.start_line) {
+          throw new Error(`delete_range end_line must be >= start_line (op ${op.id})`);
+        }
+        if ((op.patch ?? "").trim().length > 0) {
           throw new Error(`delete_range patch must be empty (op ${op.id})`);
         }
         return;
@@ -98,8 +116,8 @@ export class Guardrails {
         return;
 
       default: {
-        const _exhaustive: never = op.type;
-        throw new Error(`Unknown op type: ${_exhaustive}`);
+        const _exhaustive: never = op.type as never;
+        throw new Error(`Unknown op type: ${String(_exhaustive)}`);
       }
     }
   }

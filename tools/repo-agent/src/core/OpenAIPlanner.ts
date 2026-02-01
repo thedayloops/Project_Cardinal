@@ -87,10 +87,13 @@ function normalizePlan(parsed: any): PatchPlanLike {
     if (startLine < 1) startLine = 1;
 
     // For file ops, end_line should be null; for range ops it must be a number.
-    let endLine: number | null =
-      o?.end_line === undefined || o?.end_line === null
-        ? null
-        : toNumber(o.end_line, null as any);
+    let endLine: number | null = null;
+    if (o?.end_line !== undefined && o?.end_line !== null) {
+      // Convert to a number with a safe fallback of startLine.
+      endLine = toNumber(o.end_line, startLine);
+      // Ensure endLine is at least startLine to avoid trivial LLM numeric issues.
+      if (endLine < startLine) endLine = startLine;
+    }
 
     // If planner accidentally emits 0/undefined for file ops, force the safe shape.
     if (type === "create_file" || type === "update_file") {
