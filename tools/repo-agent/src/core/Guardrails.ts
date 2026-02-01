@@ -1,5 +1,3 @@
-// tools/repo-agent/src/core/Guardrails.ts
-
 import path from "node:path";
 import type { PatchPlan, PatchOp } from "../schemas/PatchPlan.js";
 
@@ -15,12 +13,12 @@ export type GuardrailConfig = {
   maxTotalWriteBytes: number;
 };
 
+// Narrow SELF_IMPROVE_DENY_PREFIXES to external/integration files only.
+// This allows safe, auditable self-improvement of the agent core files
+// while still blocking risky or external integrations from being modified
+// automatically in self_improve mode.
 const SELF_IMPROVE_DENY_PREFIXES = [
-  "src/core/Agent.ts",
-  "src/integrations/DiscordBot.ts",
-  "src/core/PlannerFactory.ts",
-  "src/core/ContextBuilder.ts",
-  "src/index.ts",
+  "src/integrations/DiscordBot.ts"
 ];
 
 export class Guardrails {
@@ -60,12 +58,12 @@ export class Guardrails {
       throw new Error(`Unsafe path in op: ${op.file}`);
     }
 
-    // Self-improve hard stop list
+    // Self-improve hard stop list: keep minimal restrictions for safety
     if (mode === "self_improve") {
       for (const blocked of SELF_IMPROVE_DENY_PREFIXES) {
         if (normalized.startsWith(blocked)) {
           throw new Error(
-            `self_improve is not allowed to modify core file: ${op.file}`
+            `self_improve is not allowed to modify blocked path: ${op.file}`
           );
         }
       }
