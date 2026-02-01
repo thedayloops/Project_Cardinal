@@ -84,30 +84,36 @@ export class Guardrails {
       throw new Error(`All ops must be reversible (op ${op.id})`);
     }
 
-    if (op.start_line < 1) {
-      throw new Error(`start_line must be >= 1 (op ${op.id})`);
+    // Normalize numeric fields to local variables for deterministic validation.
+    let startLine = 1;
+    if (op.start_line !== undefined && op.start_line !== null) {
+      const s = Number(op.start_line);
+      startLine = Number.isFinite(s) ? Math.max(1, Math.floor(s)) : 1;
     }
 
-    // Coerce/validate end_line locally (don't mutate the op object here; callers should
-    // rely on planners to emit correct shapes). This helps tolerate minor numeric issues
-    // while still enforcing the final constraints.
-    let endLine = op.end_line;
-    if (endLine !== null && typeof endLine === "number" && endLine < op.start_line) {
-      endLine = op.start_line;
+    let endLine: number | null = null;
+    if (op.end_line !== undefined && op.end_line !== null) {
+      const e = Number(op.end_line);
+      endLine = Number.isFinite(e) ? Math.floor(e) : startLine;
+      if (endLine < startLine) endLine = startLine;
     }
 
+    // Validate by op type using the normalized values above. Do not rely on the raw
+    // op.start_line/op.end_line presence/shape to avoid brittle behavior when planners
+    // omit fields.
     switch (op.type) {
       case "replace_range":
         if (endLine === null) {
           throw new Error(`replace_range requires end_line (op ${op.id})`);
         }
-        if (endLine < op.start_line) {
+        if (endLine < startLine) {
           throw new Error(`replace_range end_line must be >= start_line (op ${op.id})`);
         }
         return;
 
       case "insert_after":
-        if (op.end_line !== null) {
+        // For insert_after we expect no end_line.
+        if (endLine !== null) {
           throw new Error(`insert_after must have end_line=null (op ${op.id})`);
         }
         return;
@@ -116,7 +122,7 @@ export class Guardrails {
         if (endLine === null) {
           throw new Error(`delete_range requires end_line (op ${op.id})`);
         }
-        if (endLine < op.start_line) {
+        if (endLine < startLine) {
           throw new Error(`delete_range end_line must be >= start_line (op ${op.id})`);
         }
         if ((op.patch ?? "").trim().length > 0) {
@@ -126,7 +132,7 @@ export class Guardrails {
 
       case "create_file":
       case "update_file":
-        if (op.end_line !== null) {
+        if (endLine !== null) {
           throw new Error(`${op.type} must have end_line=null (op ${op.id})`);
         }
         return;
