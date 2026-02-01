@@ -1,18 +1,36 @@
+// tools/repo-agent/src/index.ts
+
 import "dotenv/config";
 
+import { loadConfig } from "./core/Config.js";
 import { Agent } from "./core/Agent.js";
 import { DiscordBot } from "./integrations/DiscordBot.js";
-import { loadConfig } from "./core/Config.js";
 
 async function main() {
   const cfg = loadConfig();
+
+  // Fail fast if LLM is enabled but no API key is present
+  if (cfg.enableLLM && !cfg.openai.apiKey) {
+    throw new Error(
+      "OPENAI_API_KEY is required when AGENT_ENABLE_LLM=true"
+    );
+  }
+
   const agent = new Agent(cfg);
 
+  const discordToken = process.env.DISCORD_TOKEN;
+  if (!discordToken) {
+    throw new Error("DISCORD_TOKEN is required to start the Discord bot");
+  }
+
   const bot = new DiscordBot(agent);
-  await bot.start(process.env.DISCORD_TOKEN!);
+  await bot.start(discordToken);
+
+  console.log("✅ Repo Agent started");
 }
 
 main().catch((err) => {
+  console.error("❌ Fatal startup error");
   console.error(err);
   process.exit(1);
 });
