@@ -1,3 +1,5 @@
+// tools/repo-agent/src/integrations/DiscordBot.ts
+
 import {
   Client,
   GatewayIntentBits,
@@ -9,10 +11,12 @@ import {
   AttachmentBuilder,
 } from "discord.js";
 
-import fs from "node:fs/promises";
-
 import { Agent } from "../core/Agent.js";
-import { clipText, formatNameStatusList, toCodeBlock } from "../util/discordText.js";
+import {
+  clipText,
+  formatNameStatusList,
+  toCodeBlock,
+} from "../util/discordText.js";
 import { makeArtifactFileName } from "../util/artifactsDir.js";
 
 const SAFE_MAX_CONTENT = 1900;
@@ -25,12 +29,8 @@ function jsonAttachment(name: string, obj: unknown) {
 }
 
 function textAttachment(name: string, text: string) {
-  return new AttachmentBuilder(Buffer.from(text ?? "", "utf8"), { name });
-}
-
-async function fileAttachmentFromPath(name: string, fileAbs: string) {
-  const buf = await fs.readFile(fileAbs);
-  return new AttachmentBuilder(buf, { name });
+  if (!text || !text.trim()) return null;
+  return new AttachmentBuilder(Buffer.from(text, "utf8"), { name });
 }
 
 export class DiscordBot {
@@ -61,6 +61,10 @@ export class DiscordBot {
     }
   }
 
+  /* -------------------------------------------------- */
+  /* SLASH COMMANDS                                     */
+  /* -------------------------------------------------- */
+
   private async handleSlash(interaction: ChatInputCommandInteraction) {
     if (interaction.commandName === "agent_run") {
       const mode = interaction.options.getString("mode", true);
@@ -82,11 +86,6 @@ export class DiscordBot {
                 "The agent is proposing changes to **its own code**:",
                 "`tools/repo-agent/**`",
                 "",
-                "Rules still apply:",
-                "- No commands removed",
-                "- No auto-execution",
-                "- Requires explicit approval",
-                "",
                 "Review carefully before approving.",
                 "",
               ].join("\n")
@@ -95,7 +94,7 @@ export class DiscordBot {
         const body = clipText(
           [
             warning,
-            "Repo Agent Proposal",
+            "📦 **Repo Agent Proposal**",
             `PlanId: ${proposal.planId}`,
             `Mode: ${mode}`,
             `Goal: ${plan.meta?.goal ?? "(none)"}`,
@@ -124,56 +123,6 @@ export class DiscordBot {
       return;
     }
 
-    if (interaction.commandName === "agent_merge") {
-      await interaction.reply({ content: "Merging last agent branch…", ephemeral: true });
-      try {
-        const r = await this.agent.mergeLastAgentBranch();
-        await interaction.editReply(`✅ Merged \`${r.mergedBranch}\` into \`main\``);
-      } catch (err: any) {
-        await interaction.editReply(`❌ Merge failed:\n${err?.message ?? String(err)}`);
-      }
-      return;
-    }
-
-    if (interaction.commandName === "agent_cleanup") {
-      await interaction.reply({ content: "Cleaning up agent branches…", ephemeral: true });
-      try {
-        const r = await this.agent.cleanupAgentBranches();
-        if (r.deleted.length === 0) {
-          await interaction.editReply("Nothing to clean.");
-          return;
-        }
-        await interaction.editReply(
-          `🧹 Deleted branches:\n${r.deleted.map((b) => `• ${b}`).join("\n")}`
-        );
-      } catch (err: any) {
-        await interaction.editReply(`❌ Cleanup failed:\n${err?.message ?? String(err)}`);
-      }
-      return;
-    }
-
-    if (interaction.commandName === "agent_explain") {
-      const plan = this.agent.getLastPlan();
-      const planId = this.agent.getPendingPlanId() ?? "unknown";
-
-      if (!plan) {
-        await interaction.reply({ content: "No plan available.", ephemeral: true });
-        return;
-      }
-
-      const file = makeArtifactFileName("plan", planId, "json");
-
-      await interaction.reply({
-        content: clipText(
-          ["Plan preview:", clipText(JSON.stringify(plan, null, 2), 1200)].join("\n"),
-          SAFE_MAX_CONTENT
-        ),
-        files: [jsonAttachment(file, plan)],
-        ephemeral: true,
-      });
-      return;
-    }
-
     if (interaction.commandName === "agent_status") {
       await interaction.reply({
         content: JSON.stringify(await this.agent.getStatus(), null, 2),
@@ -189,7 +138,37 @@ export class DiscordBot {
       });
       return;
     }
+
+    if (interaction.commandName === "agent_explain") {
+      const plan = this.agent.getLastPlan();
+      const planId = this.agent.getPendingPlanId() ?? "unknown";
+
+      if (!plan) {
+        await interaction.reply({
+          content: "No plan available.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const file = makeArtifactFileName("plan", planId, "json");
+
+      await interaction.reply({
+        content: clipText(
+          ["Plan preview:", clipText(JSON.stringify(plan, null, 2), 1200)].join(
+            "\n"
+          ),
+          SAFE_MAX_CONTENT
+        ),
+        files: [jsonAttachment(file, plan)],
+        ephemeral: true,
+      });
+    }
   }
+
+  /* -------------------------------------------------- */
+  /* BUTTONS                                            */
+  /* -------------------------------------------------- */
 
   private async handleButton(interaction: Interaction) {
     if (!interaction.isButton()) return;
@@ -209,59 +188,41 @@ export class DiscordBot {
         const planFile = makeArtifactFileName("plan", planId, "json");
         const diffFile = makeArtifactFileName("diff", planId, "patch");
 
-        const lines: string[] = [
-          "✅ Plan executed",
-          "",
-          `Branch: ${result.branch}`,
-          `Commit: ${result.commit}`,
-          "",
-          "Files changed:",
-          formatNameStatusList(result.filesChanged),
-          "",
-          "Diff preview:",
-          toCodeBlock(clipText(result.diffSnippet, 900), "diff"),
-          "",
-        ];
+        const diffPreview =
+          result.diffFull && result.diffFull.trim()
+            ? toCodeBlock(
+                clipText(result.diffFull, 900),
+                "diff"
+              )
+            : "_No diff preview available._";
 
-        const files: AttachmentBuilder[] = [
-          ...(plan ? [jsonAttachment(planFile, plan)] : []),
-          textAttachment(diffFile, result.diffFull),
-        ];
-
-        if (result.verification) {
-          const v = result.verification;
-          if (v.ok) {
-            lines.push("Verification: ✅ build passed (npm run build)");
-          } else {
-            lines.push(
-              "Verification: ❌ build failed (npm run build)",
-              "Merge is blocked until a verified self-improve branch exists.",
-              "",
-              "Build logs attached."
-            );
-
-            try {
-              files.push(await fileAttachmentFromPath(`build_${planId}_stdout.log`, v.stdoutPath));
-            } catch {}
-            try {
-              files.push(await fileAttachmentFromPath(`build_${planId}_stderr.log`, v.stderrPath));
-            } catch {}
-          }
-        } else {
-          lines.push("Verification: (not run)");
-        }
-
-        lines.push(
-          "",
-          "Push when ready:",
-          `git push -u origin ${result.branch}`
+        const content = clipText(
+          [
+            "✅ **Plan executed**",
+            "",
+            `Branch: ${result.branch}`,
+            `Commit: ${result.commit}`,
+            "",
+            "Files changed:",
+            formatNameStatusList(result.filesChanged),
+            "",
+            "Diff preview:",
+            diffPreview,
+            "",
+            "Push when ready:",
+            `git push -u origin ${result.branch}`,
+          ].join("\n"),
+          SAFE_MAX_CONTENT
         );
 
-        const content = clipText(lines.join("\n"), SAFE_MAX_CONTENT);
+        const attachments = [
+          plan ? jsonAttachment(planFile, plan) : null,
+          textAttachment(diffFile, result.diffFull),
+        ].filter(Boolean) as AttachmentBuilder[];
 
         await interaction.editReply({
           content,
-          files,
+          files: attachments,
         });
       } catch (err: any) {
         await interaction.editReply(
@@ -273,7 +234,10 @@ export class DiscordBot {
 
     if (interaction.customId === "agent_reject") {
       this.agent.clearPendingPlan();
-      await interaction.reply({ content: "Proposal rejected.", ephemeral: true });
+      await interaction.reply({
+        content: "Proposal rejected.",
+        ephemeral: true,
+      });
     }
   }
 
