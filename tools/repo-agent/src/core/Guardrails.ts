@@ -22,8 +22,8 @@ const SELF_IMPROVE_DENY_PREFIXES = [
   // in self_improve mode. This is intentionally conservative and can be
   // expanded or relaxed via configuration if needed.
   "src/integrations/",
-  "src/integrations/DiscordBot.ts"
 ];
+
 
 export class Guardrails {
   constructor(private cfg: GuardrailConfig) {}
