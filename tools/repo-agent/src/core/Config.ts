@@ -100,7 +100,7 @@ export function loadConfig(): AgentConfig {
   guardrails: {
   maxOps: num(process.env.AGENT_MAX_OPS, 25),
   maxTotalWriteBytes: num(process.env.AGENT_MAX_WRITE_BYTES, 300000),
-  maxFileBytes: 300_000,
+  maxFileBytes: num(process.env.AGENT_MAX_FILE_BYTES, 300000),
   lockedPathPrefixes: ["node_modules/", ".git/"],
   deniedPathPrefixes: [],
   },
