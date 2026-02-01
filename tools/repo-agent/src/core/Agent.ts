@@ -15,6 +15,8 @@ import { PatchExecutor } from "./PatchExecutor.js";
 type LastBranchState = {
   branch: string;
   at: string;
+  // repoRoot where the branch was created. This makes merge/cleanup restart-safe
+  repoRoot: string;
 };
 
 export class Agent {
@@ -25,7 +27,8 @@ export class Agent {
   private pendingPlan: PatchPlan | null = null;
   private pendingPlanId: string | null = null;
 
-  private lastAgentBranch: string | null = null;
+  // Now store richer state for the last agent branch (branch + repoRoot + timestamp)
+  private lastAgentBranch: LastBranchState | null = null;
 
   constructor(cfg: AgentConfig) {
     this.cfg = cfg;
@@ -59,11 +62,13 @@ export class Agent {
     await fs.writeFile(this.lastBranchFile(), JSON.stringify(state, null, 2), "utf8");
   }
 
-  private async readLastAgentBranch(): Promise<string> {
+  private async readLastAgentBranch(): Promise<LastBranchState> {
     const raw = await fs.readFile(this.lastBranchFile(), "utf8");
     const parsed = JSON.parse(raw) as LastBranchState;
     if (!parsed?.branch) throw new Error("Invalid last_agent_branch.json");
-    return parsed.branch;
+    // Backwards compatibility: if repoRoot missing, default to cfg.repoRoot
+    if (!parsed.repoRoot) parsed.repoRoot = this.cfg.repoRoot;
+    return parsed;
   }
 
   private async clearLastAgentBranch() {
@@ -84,7 +89,8 @@ export class Agent {
       targetRepoRoot: this.cfg.targetRepoRoot,
       pending_plan: Boolean(this.pendingPlan),
       pending_plan_id: this.pendingPlanId,
-      last_agent_branch: this.lastAgentBranch,
+      // Keep the public shape the same (string or null)
+      last_agent_branch: this.lastAgentBranch ? this.lastAgentBranch.branch : null,
     };
   }
 
@@ -193,8 +199,8 @@ export class Agent {
     );
 
     // Persist last executed agent branch for /agent_merge after restart
-    this.lastAgentBranch = branch;
-    await this.writeLastAgentBranch({ branch, at: new Date().toISOString() });
+    this.lastAgentBranch = { branch, at: new Date().toISOString(), repoRoot: active.root };
+    await this.writeLastAgentBranch(this.lastAgentBranch);
 
     const diffNames = await gitSvc.diffNameStatus(headBefore);
     const diffFull = await gitSvc.diffUnified(headBefore, 400_000);
@@ -226,8 +232,10 @@ export class Agent {
       throw new Error("No agent branch available to merge.");
     }
 
-    const branch = this.lastAgentBranch;
-    const git = new GitService(this.cfg.repoRoot);
+    const branch = this.lastAgentBranch.branch;
+    // Use the repoRoot recorded when the branch was created; fallback to cfg.repoRoot
+    const repoRoot = this.lastAgentBranch.repoRoot ?? this.cfg.repoRoot;
+    const git = new GitService(repoRoot);
 
     const status = await git.status();
     if (status.files.length > 0) {
