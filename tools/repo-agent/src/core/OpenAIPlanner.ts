@@ -239,4 +239,33 @@ export class OpenAIPlanner implements IPlanner {
 
     return normalizePlan(parsed);
   }
+
+  // Add a minimal, safe planFiles implementation to satisfy the IPlanner
+  // interface and provide a conservative file list for callers that rely
+  // on planFiles. This method is intentionally non-destructive and returns
+  // file paths discovered in the preview/context when available.
+  async planFiles(ctx: any) {
+    try {
+      const files: string[] = [];
+
+      // Prefer filesPreview (PlannerFactory may pass this), fall back to ctx.files
+      if (Array.isArray(ctx?.filesPreview)) {
+        for (const f of ctx.filesPreview) {
+          if (f && typeof f.path === "string") files.push(f.path);
+        }
+      } else if (Array.isArray(ctx?.files)) {
+        for (const f of ctx.files) {
+          if (f && typeof f.path === "string") files.push(f.path);
+        }
+      }
+
+      return { intent: "Return candidate files from preview", files };
+    } catch (err) {
+      // Never throw from this helper to avoid breaking callers — return an empty safe result.
+      try {
+        defaultLogger.debug("OpenAIPlanner.planFiles encountered an error", err);
+      } catch {}
+      return { intent: "error", files: [] };
+    }
+  }
 }
