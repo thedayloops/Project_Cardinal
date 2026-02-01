@@ -3,6 +3,7 @@
 import OpenAI from "openai";
 import type { IPlanner, PlannerInput } from "./PlannerFactory.js";
 import { recordTokenCall, type TokenCall } from "../util/tokenLedger.js";
+import { defaultLogger } from "./Logger.js";
 import path from "node:path";
 
 // Runtime shape normalized into PatchPlan expectations
@@ -211,8 +212,14 @@ export class OpenAIPlanner implements IPlanner {
         };
         await recordTokenCall(this.opts.artifactsDir, call);
       }
-    } catch {
+    } catch (err) {
       // ledger failures must NEVER block planning
+      // Log a non-fatal warning to aid observability while keeping behavior unchanged.
+      try {
+        defaultLogger.warn("Failed to record token call", err);
+      } catch {
+        // Ensure logging failures never throw
+      }
     }
 
     const raw = (res as any)?.output_text?.trim();
