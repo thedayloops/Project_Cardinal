@@ -32,3 +32,5 @@ Observability & troubleshooting tips
 If you need to expand this file, keep changes minimal and document rationale for future reviewers.
 
 Quick reminder (non-functional): prefer the shared `defaultLogger` for structured output across modules. Keep self_improve edits minimal, auditable, and reversible — avoid changes that modify external integrations or public APIs without manual review.
+
+Note: The Logger module (src/core/Logger.ts) exports a named singleton `defaultLogger` and a small constant `defaultLogLevel`. Prefer using these shared exports for consistent structured logging and to align tooling or tests with the intended verbosity. This README update is purely informational and does not change runtime behavior.
