@@ -1,6 +1,6 @@
 // tools/repo-agent/src/index.ts
 
-import "dotenv/config";
+import "dotenv/config"; // MUST be first
 
 import { loadConfig } from "./core/Config.js";
 import { Agent } from "./core/Agent.js";
@@ -9,11 +9,12 @@ import { DiscordBot } from "./integrations/DiscordBot.js";
 async function main() {
   const cfg = loadConfig();
 
-  // Fail fast if LLM is enabled but no API key is present
+  // 🔧 HARDENED: never hard-crash on missing OpenAI key
   if (cfg.enableLLM && !cfg.openai.apiKey) {
-    throw new Error(
-      "OPENAI_API_KEY is required when AGENT_ENABLE_LLM=true"
+    console.warn(
+      "⚠️  OPENAI_API_KEY missing — disabling LLM features for this run"
     );
+    cfg.enableLLM = false;
   }
 
   const agent = new Agent(cfg);
