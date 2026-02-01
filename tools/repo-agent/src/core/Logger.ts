@@ -65,3 +65,7 @@ export type LogLevel = "debug" | "info" | "warn" | "error";
 export const defaultLogLevel: LogLevel = "debug";
 
 export const defaultLogger = new Logger();
+
+// NOTE: This trailing comment was added to mark an intentional, minimal
+// self_improve edit for auditability. This change is non-functional and
+// fully reversible by restoring the previous file contents.
