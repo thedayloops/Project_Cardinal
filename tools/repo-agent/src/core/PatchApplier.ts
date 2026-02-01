@@ -16,7 +16,10 @@ export class PatchApplier {
     const results: ApplyResult[] = [];
 
     for (const op of plan.ops) {
-      const absPath = path.join(this.repoRoot, op.file);
+      // Ensure the target path is safe and inside the repository root.
+      this.ensureSafeRepoPath(op.file);
+
+      const absPath = path.resolve(this.repoRoot, op.file);
 
       const existedBefore = await this.exists(absPath);
 
@@ -111,5 +114,23 @@ export class PatchApplier {
     } catch {
       return false;
     }
+  }
+
+  private ensureSafeRepoPath(relPath: string) {
+    // Prevent absolute/escaped paths and ensure the resolved path stays within repoRoot.
+    if (!relPath || path.isAbsolute(relPath)) {
+      throw new Error(`Unsafe file path (absolute or empty): ${relPath}`);
+    }
+
+    const repoRootResolved = path.resolve(this.repoRoot);
+    const resolved = path.resolve(this.repoRoot, relPath);
+    const relative = path.relative(repoRootResolved, resolved);
+
+    // If relative starts with '..' we are outside the repo root.
+    if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
+      return; // safe
+    }
+
+    throw new Error(`Unsafe path outside repository root: ${relPath}`);
   }
 }
