@@ -53,3 +53,8 @@ export class Logger {
     );
   }
 }
+
+// Add a lightweight, named singleton export to make it easy for other
+// modules to use a shared logger without changing existing usages of the
+// Logger class. This is additive and fully reversible.
+export const defaultLogger = new Logger();
