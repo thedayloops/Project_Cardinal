@@ -1,6 +1,24 @@
 // tools/repo-agent/src/index.ts
 
-import "dotenv/config"; // MUST be first
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import dotenv from "dotenv";
+
+// ---------------------------------------------
+// EXPLICITLY LOAD .env FROM PROJECT ROOT
+// ---------------------------------------------
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// repo-agent lives at: <root>/tools/repo-agent/
+// so project root is two levels up
+const projectRoot = path.resolve(__dirname, "../../..");
+
+dotenv.config({
+  path: path.join(projectRoot, ".env"),
+});
+
+// ---------------------------------------------
 
 import { loadConfig } from "./core/Config.js";
 import { Agent } from "./core/Agent.js";
@@ -9,7 +27,7 @@ import { DiscordBot } from "./integrations/DiscordBot.js";
 async function main() {
   const cfg = loadConfig();
 
-  // ---- LLM SAFETY (do NOT mutate env, only runtime behavior) ----
+  // ---- LLM SAFETY (runtime only, no env mutation) ----
   if (cfg.enableLLM && !cfg.openai.apiKey) {
     console.warn(
       "⚠️  OPENAI_API_KEY missing — disabling LLM features for this run"
@@ -31,7 +49,6 @@ async function main() {
     return;
   }
 
-  // ---- START DISCORD BOT ----
   const bot = new DiscordBot(agent);
   await bot.start(token);
 
