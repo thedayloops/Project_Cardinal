@@ -6,6 +6,9 @@ export async function registerCommands(
   guildId?: string
 ) {
   const commands = [
+    // -------------------------
+    // /agent_run
+    // -------------------------
     new SlashCommandBuilder()
       .setName("agent_run")
       .setDescription("Run the repository agent in a selected mode")
@@ -29,19 +32,44 @@ export async function registerCommands(
       )
       .toJSON(),
 
+    // -------------------------
+    // /agent_status
+    // -------------------------
     new SlashCommandBuilder()
       .setName("agent_status")
       .setDescription("Show agent status")
       .toJSON(),
 
+    // -------------------------
+    // /agent_tokens
+    // -------------------------
     new SlashCommandBuilder()
       .setName("agent_tokens")
       .setDescription("Show agent token usage")
       .toJSON(),
 
+    // -------------------------
+    // /agent_explain
+    // -------------------------
     new SlashCommandBuilder()
       .setName("agent_explain")
       .setDescription("Explain the last generated plan")
+      .toJSON(),
+
+    // -------------------------
+    // ✅ NEW: /agent_merge
+    // -------------------------
+    new SlashCommandBuilder()
+      .setName("agent_merge")
+      .setDescription("Merge the most recent agent/* branch into main")
+      .toJSON(),
+
+    // -------------------------
+    // ✅ NEW: /agent_cleanup
+    // -------------------------
+    new SlashCommandBuilder()
+      .setName("agent_cleanup")
+      .setDescription("Delete all local agent/* branches (keeps main)")
       .toJSON(),
   ];
 

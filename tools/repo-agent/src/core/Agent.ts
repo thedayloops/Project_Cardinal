@@ -1,7 +1,4 @@
-// tools/repo-agent/src/core/Agent.ts
-
 import fs from "node:fs/promises";
-import path from "node:path";
 import simpleGit from "simple-git";
 
 import { ContextBuilder, type Trigger } from "./ContextBuilder.js";
@@ -36,15 +33,13 @@ export class Agent {
   private resolveActiveRepo(mode: string) {
     if (mode === "self_improve") {
       return {
-        root: this.cfg.repoRoot, // tools/repo-agent
-        git: new GitService(this.cfg.repoRoot),
+        root: this.cfg.repoRoot,
         isSelfImprove: true,
       };
     }
 
     return {
       root: this.cfg.targetRepoRoot,
-      git: new GitService(this.cfg.targetRepoRoot),
       isSelfImprove: false,
     };
   }
@@ -115,6 +110,9 @@ export class Agent {
       filesPreview: ctx.files,
     })) as PatchPlan;
 
+    (plan as any).meta = (plan as any).meta ?? {};
+    (plan as any).meta.mode = mode;
+
     this.pendingPlan = plan;
     this.pendingPlanId = planId;
 
@@ -122,7 +120,7 @@ export class Agent {
   }
 
   // -------------------------
-  // EXECUTION PHASE (FIXED ROOT)
+  // EXECUTION PHASE
   // -------------------------
   async executeApprovedPlan() {
     if (!this.pendingPlan || !this.pendingPlanId) {
@@ -140,16 +138,9 @@ export class Agent {
 
     await gitSvc.createBranch(branch);
 
-    // 🔑 CRITICAL FIX:
-    // self_improve ops are relative to tools/repo-agent
-    const executorRoot = active.isSelfImprove
-      ? this.cfg.repoRoot
-      : active.root;
-
-    const executor = new PatchExecutor({ repoRoot: executorRoot });
+    const executor = new PatchExecutor({ repoRoot: active.root });
     await executor.applyAll(this.pendingPlan.ops);
 
-    // Detect working-tree changes
     const status = await git.status();
     const hasChanges =
       status.not_added.length ||
@@ -183,5 +174,45 @@ export class Agent {
       diffSnippet,
       diffFull,
     };
+  }
+
+  // -------------------------
+  // NEW: MERGE COMMAND
+  // -------------------------
+  async mergeLastAgentBranch() {
+    if (!this.pendingPlanId) {
+      throw new Error("No agent branch available to merge.");
+    }
+
+    const branch = `agent/${this.pendingPlanId}`;
+    const git = new GitService(this.cfg.repoRoot);
+
+    const status = await git.status();
+    if (status.files.length > 0) {
+      throw new Error("Working tree is not clean.");
+    }
+
+    await git.checkout("main");
+    await git.merge(branch);
+
+    return { mergedBranch: branch };
+  }
+
+  // -------------------------
+  // NEW: CLEANUP COMMAND
+  // -------------------------
+  async cleanupAgentBranches() {
+    const git = new GitService(this.cfg.repoRoot);
+    const branches = await git.listLocalBranches();
+
+    const toDelete = branches.filter(
+      (b) => b !== "main" && b.startsWith("agent/")
+    );
+
+    for (const branch of toDelete) {
+      await git.deleteBranch(branch, true);
+    }
+
+    return { deleted: toDelete };
   }
 }
