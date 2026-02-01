@@ -10,7 +10,11 @@ import {
 } from "discord.js";
 
 import { Agent } from "../core/Agent.js";
-import { clipText, formatNameStatusList, toCodeBlock } from "../util/discordText.js";
+import {
+  clipText,
+  formatNameStatusList,
+  toCodeBlock,
+} from "../util/discordText.js";
 import { makeArtifactFileName } from "../util/artifactsDir.js";
 
 const SAFE_MAX_CONTENT = 1900;
@@ -54,7 +58,13 @@ export class DiscordBot {
     }
   }
 
+  // ============================================================
+  // SLASH COMMAND HANDLER
+  // ============================================================
   private async handleSlash(interaction: ChatInputCommandInteraction) {
+    // ------------------------------------------------------------
+    // /agent_run
+    // ------------------------------------------------------------
     if (interaction.commandName === "agent_run") {
       const mode = interaction.options.getString("mode", true);
       const reason = interaction.options.getString("reason");
@@ -74,11 +84,6 @@ export class DiscordBot {
                 "",
                 "The agent is proposing changes to **its own code**:",
                 "`tools/repo-agent/**`",
-                "",
-                "Rules still apply:",
-                "- No commands removed",
-                "- No auto-execution",
-                "- Requires explicit approval",
                 "",
                 "Review carefully before approving.",
                 "",
@@ -117,12 +122,67 @@ export class DiscordBot {
       return;
     }
 
+    // ------------------------------------------------------------
+    // /agent_merge
+    // ------------------------------------------------------------
+    if (interaction.commandName === "agent_merge") {
+      await interaction.reply({ content: "Merging agent branch…", ephemeral: true });
+
+      try {
+        const result = await this.agent.mergeLastAgentBranch();
+        await interaction.editReply(
+          `✅ Merged \`${result.mergedBranch}\` into \`main\``
+        );
+      } catch (err: any) {
+        await interaction.editReply(
+          `❌ Merge failed:\n${err?.message ?? String(err)}`
+        );
+      }
+      return;
+    }
+
+    // ------------------------------------------------------------
+    // /agent_cleanup
+    // ------------------------------------------------------------
+    if (interaction.commandName === "agent_cleanup") {
+      await interaction.reply({
+        content: "Cleaning up agent branches…",
+        ephemeral: true,
+      });
+
+      try {
+        const result = await this.agent.cleanupAgentBranches();
+
+        if (result.deleted.length === 0) {
+          await interaction.editReply("Nothing to clean.");
+          return;
+        }
+
+        await interaction.editReply(
+          `🧹 Deleted branches:\n${result.deleted
+            .map((b) => `• ${b}`)
+            .join("\n")}`
+        );
+      } catch (err: any) {
+        await interaction.editReply(
+          `❌ Cleanup failed:\n${err?.message ?? String(err)}`
+        );
+      }
+      return;
+    }
+
+    // ------------------------------------------------------------
+    // /agent_explain
+    // ------------------------------------------------------------
     if (interaction.commandName === "agent_explain") {
       const plan = this.agent.getLastPlan();
       const planId = this.agent.getPendingPlanId() ?? "unknown";
 
       if (!plan) {
-        await interaction.reply({ content: "No plan available.", ephemeral: true });
+        await interaction.reply({
+          content: "No plan available.",
+          ephemeral: true,
+        });
         return;
       }
 
@@ -141,6 +201,9 @@ export class DiscordBot {
       return;
     }
 
+    // ------------------------------------------------------------
+    // /agent_status
+    // ------------------------------------------------------------
     if (interaction.commandName === "agent_status") {
       await interaction.reply({
         content: JSON.stringify(await this.agent.getStatus(), null, 2),
@@ -149,6 +212,9 @@ export class DiscordBot {
       return;
     }
 
+    // ------------------------------------------------------------
+    // /agent_tokens
+    // ------------------------------------------------------------
     if (interaction.commandName === "agent_tokens") {
       await interaction.reply({
         content: JSON.stringify(await this.agent.getTokenStats(), null, 2),
@@ -158,6 +224,9 @@ export class DiscordBot {
     }
   }
 
+  // ============================================================
+  // BUTTON HANDLER
+  // ============================================================
   private async handleButton(interaction: Interaction) {
     if (!interaction.isButton()) return;
 
@@ -188,9 +257,6 @@ export class DiscordBot {
             "",
             "Diff preview:",
             toCodeBlock(clipText(result.diffSnippet, 900), "diff"),
-            "",
-            "Push when ready:",
-            `git push -u origin ${result.branch}`,
           ].join("\n"),
           SAFE_MAX_CONTENT
         );
@@ -212,7 +278,10 @@ export class DiscordBot {
 
     if (interaction.customId === "agent_reject") {
       this.agent.clearPendingPlan();
-      await interaction.reply({ content: "Proposal rejected.", ephemeral: true });
+      await interaction.reply({
+        content: "Proposal rejected.",
+        ephemeral: true,
+      });
     }
   }
 
