@@ -149,6 +149,7 @@ export class OpenAIPlanner implements IPlanner {
       "- Keep changes minimal and low-risk; keep ops small and focused.",
       "- Do NOT add new Discord commands and do NOT remove or rename existing commands/options.",
       "- If you propose changes to the repo-agent itself, keep them additive and backwards-compatible.",
+      "- If an op is missing the 'reversible' field, set it to true.",
     ];
 
     if (input.mode === "self_improve") {

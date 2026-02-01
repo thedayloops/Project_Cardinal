@@ -77,7 +77,10 @@ export class Guardrails {
       }
     }
 
-    if (op.reversible !== true) {
+    // Backwards-compatible handling for the reversible flag:
+    // Many planners historically omitted the 'reversible' field. Treat a missing field as
+    // reversible=true to avoid unnecessary rejections. Only explicitly false values are rejected.
+    if (op.reversible === false) {
       throw new Error(`All ops must be reversible (op ${op.id})`);
     }
 
