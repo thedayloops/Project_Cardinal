@@ -30,3 +30,5 @@ Observability & troubleshooting tips
 - If you need more verbose output while developing, inspect debug logs (the Logger has a debug method that is safe to call in all environments).
 
 If you need to expand this file, keep changes minimal and document rationale for future reviewers.
+
+Quick reminder (non-functional): prefer the shared `defaultLogger` for structured output across modules. Keep self_improve edits minimal, auditable, and reversible — avoid changes that modify external integrations or public APIs without manual review.
