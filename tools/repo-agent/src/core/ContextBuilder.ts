@@ -98,6 +98,23 @@ export class ContextBuilder {
 
         if (e.isDirectory()) {
           if (SKIP_DIRS.has(e.name)) continue;
+
+          // Safety: avoid traversing the repo-agent sources unless explicitly in self_improve mode.
+          // This prevents planners from accidentally including the agent code when planning for other repos.
+          // We detect the canonical layout tools/repo-agent by checking the parent directory name here.
+          try {
+            if (
+              e.name === "repo-agent" &&
+              path.basename(dir) === "tools" &&
+              trigger.mode !== "self_improve"
+            ) {
+              // Skip the agent sources in normal runs
+              continue;
+            }
+          } catch {
+            // defensive: if path operations fail, don't block traversal
+          }
+
           await walk(path.join(dir, e.name));
           continue;
         }
