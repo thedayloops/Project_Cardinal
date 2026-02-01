@@ -15,6 +15,7 @@ Key notes
   - The module also exports a small constant `defaultLogLevel` (e.g. `"debug"`) to document the intended
   log level for local development and debugging without changing runtime behavior. Consumers can reference
   this constant to align tooling or tests with the project's suggested verbosity.
+  - Note: prefer reading `defaultLogLevel` alongside `defaultLogger` when writing or testing code that depends on verbosity.
 - Guardrails: modifications that affect integrations/external surfaces are intentionally restricted in self_improve mode — prefer manual review for high-risk changes.
 
 Where to look
