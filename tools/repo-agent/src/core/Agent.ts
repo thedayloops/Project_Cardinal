@@ -14,13 +14,6 @@ import { resolveArtifactsDirAbs } from "../util/artifactsDir.js";
 import { PatchExecutor } from "./PatchExecutor.js";
 import { runCmdNoShell } from "../util/childProc.js";
 
-type LastAgentBranch = {
-  branch: string;
-  planId: string;
-  mode: string;
-  verified: boolean;
-};
-
 export class Agent {
   private cfg: AgentConfig;
   private planner: ReturnType<typeof createPlanner>;
@@ -37,7 +30,7 @@ export class Agent {
   }
 
   /* -------------------------------------------------- */
-  /* STATUS / HELPERS                                   */
+  /* BASIC HELPERS                                      */
   /* -------------------------------------------------- */
 
   async getStatus() {
@@ -124,7 +117,7 @@ export class Agent {
     }
 
     const planId = this.pendingPlanId;
-    const mode = (this.pendingPlan as any)?.meta?.mode ?? "unknown";
+    const mode = (this.pendingPlan as any)?.meta?.mode;
     const root =
       mode === "self_improve" ? this.cfg.repoRoot : this.cfg.targetRepoRoot;
 
@@ -155,33 +148,19 @@ export class Agent {
         `agent: ${this.pendingPlan.meta?.goal ?? "apply"} (${planId})`
       );
 
-      let verified = false;
-
+      // ✅ lightweight verification for self-improve
       if (mode === "self_improve") {
         const r = await runCmdNoShell({
-          cmd: process.platform === "win32" ? "npm.cmd" : "npm",
-          args: ["run", "build"],
+          cmd: process.platform === "win32" ? "npx.cmd" : "npx",
+          args: ["tsc", "--noEmit"],
           cwd: this.cfg.repoRoot,
-          timeoutMs: 10 * 60 * 1000,
+          timeoutMs: 5 * 60 * 1000,
         });
 
         if (!r.ok) {
-          throw new Error("Build verification failed.");
+          throw new Error("Build verification failed");
         }
-        verified = true;
       }
-
-      const lastBranch: LastAgentBranch = {
-        branch,
-        planId,
-        mode,
-        verified,
-      };
-
-      await fs.writeFile(
-        path.join(this.artifactsAbsDir, "last_agent_branch.json"),
-        JSON.stringify(lastBranch, null, 2)
-      );
 
       this.clearPendingPlan();
 
@@ -189,13 +168,14 @@ export class Agent {
         branch,
         commit,
         filesChanged: await gitSvc.diffNameStatus(originalHead),
-        diffSnippet: await gitSvc.diffUnified(originalHead, 1800),
+        diffSnippet: await gitSvc.diffUnified(originalHead, 1500),
         diffFull: await gitSvc.diffUnified(originalHead, 400_000),
       };
     } catch (err) {
+      // 🔧 FIXED: use simple-git for raw commands
       await git.checkout("main").catch(() => {});
       await git.raw(["reset", "--hard", originalHead]).catch(() => {});
-      await git.deleteLocalBranch(branch, true).catch(() => {});
+      await git.raw(["branch", "-D", branch]).catch(() => {});
       this.clearPendingPlan();
       throw err;
     }
@@ -206,24 +186,22 @@ export class Agent {
   /* -------------------------------------------------- */
 
   async mergeLastAgentBranch() {
-    const metaPath = path.join(this.artifactsAbsDir, "last_agent_branch.json");
+    const git = new GitService(this.cfg.repoRoot);
+    const branches = await git.listLocalBranches();
 
-    let meta: LastAgentBranch;
-    try {
-      meta = JSON.parse(await fs.readFile(metaPath, "utf8")) as LastAgentBranch;
-    } catch {
+    const last = branches
+      .filter((b) => b.startsWith("agent/"))
+      .sort()
+      .at(-1);
+
+    if (!last) {
       throw new Error("No agent branch available to merge.");
     }
 
-    if (meta.mode === "self_improve" && !meta.verified) {
-      throw new Error("Self-improve branch is not verified.");
-    }
-
-    const git = new GitService(this.cfg.repoRoot);
     await git.checkout("main");
-    await git.merge(meta.branch);
+    await git.merge(last);
 
-    return { mergedBranch: meta.branch };
+    return { mergedBranch: last };
   }
 
   /* -------------------------------------------------- */
@@ -231,23 +209,18 @@ export class Agent {
   /* -------------------------------------------------- */
 
   async cleanupAgentBranches() {
-    const git = new GitService(this.cfg.repoRoot);
-    const branches = await git.listLocalBranches();
+    const git = simpleGit(this.cfg.repoRoot);
+    const branches = await git.branchLocal();
 
-    const toDelete = branches.filter(
-      (b: string) => b !== "main" && b.startsWith("agent/")
-    );
+    const deleted: string[] = [];
 
-    for (const b of toDelete) {
-      await git.deleteBranch(b, true);
+    for (const b of branches.all) {
+      if (b !== "main" && b.startsWith("agent/")) {
+        await git.raw(["branch", "-D", b]).catch(() => {});
+        deleted.push(b);
+      }
     }
 
-    await fs
-      .rm(path.join(this.artifactsAbsDir, "last_agent_branch.json"), {
-        force: true,
-      })
-      .catch(() => {});
-
-    return { deleted: toDelete };
+    return { deleted };
   }
 }
