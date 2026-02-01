@@ -10,8 +10,11 @@ Key notes
 - This is a non-functional, documentation-only change. It does not modify code or public APIs.
 - Logger: use `defaultLogger` from src/core/Logger.ts for consistent structured output.
   - The repository exposes a shared singleton `defaultLogger` to make it easy to emit info/debug/warn/error
-    messages consistently across modules. Prefer `defaultLogger` instead of ad-hoc console calls.
+  messages consistently across modules. Prefer `defaultLogger` instead of ad-hoc console calls.
   - The Logger includes a `debug` method that falls back to console.log where console.debug is not available.
+  - The module also exports a small constant `defaultLogLevel` (e.g. `"debug"`) to document the intended
+  log level for local development and debugging without changing runtime behavior. Consumers can reference
+  this constant to align tooling or tests with the project's suggested verbosity.
 - Guardrails: modifications that affect integrations/external surfaces are intentionally restricted in self_improve mode — prefer manual review for high-risk changes.
 
 Where to look
