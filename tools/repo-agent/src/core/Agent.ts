@@ -12,6 +12,7 @@ import type { PatchPlan } from "../schemas/PatchPlan.js";
 import { loadLedger } from "../util/tokenLedger.js";
 import { resolveArtifactsDirAbs } from "../util/artifactsDir.js";
 import { PatchExecutor } from "./PatchExecutor.js";
+import { defaultLogger } from "./Logger.js";
 
 export class Agent {
   private cfg: AgentConfig;
@@ -99,6 +100,19 @@ export class Agent {
     this.pendingPlan = plan;
     this.pendingPlanId = planId;
 
+    // Non-fatal observability: log plan creation for auditing and debugging.
+    try {
+      defaultLogger.info(
+        `Agent.run created plan=${planId} mode=${mode} ops=${plan.ops?.length ?? 0}`
+      );
+      defaultLogger.debug("Agent.run.plan_meta", plan.meta ?? {});
+    } catch (err) {
+      // Ensure logging never throws
+      try {
+        console.warn("Agent: logging failure during run", err);
+      } catch {}
+    }
+
     return { planId, patchPlan: plan };
   }
 
@@ -118,6 +132,17 @@ export class Agent {
     const gitSvc = new GitService(root);
     const originalHead = await gitSvc.getHeadSha();
     const branch = `agent/${planId}`;
+
+    // Log execution start for observability.
+    try {
+      defaultLogger.info(
+        `Agent.executeApprovedPlan starting plan=${planId} branch=${branch} ops=${this.pendingPlan.ops?.length ?? 0}`
+      );
+    } catch (err) {
+      try {
+        console.warn("Agent: logging failure during executeApprovedPlan", err);
+      } catch {}
+    }
 
     try {
       await gitSvc.createBranch(branch);
