@@ -72,7 +72,7 @@ export class ApprovalExecutor {
       // Hard rollback if anything goes wrong (including verification).
       await this.git.reset(["--hard"]).catch(() => {});
       await this.git.checkout(baseBranch).catch(() => {});
-      await this.git.branch(["-D", branch]).catch(() => {});
+  await this.git.raw(["branch", "-D", branch]).catch(() => {});
       throw err;
     } finally {
       await this.git.checkout(baseBranch).catch(() => {});

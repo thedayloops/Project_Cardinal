@@ -66,6 +66,7 @@ export class DiscordBot {
   /* -------------------------------------------------- */
 
   private async handleSlash(interaction: ChatInputCommandInteraction) {
+    /* ---------------- agent_run ---------------- */
     if (interaction.commandName === "agent_run") {
       const mode = interaction.options.getString("mode", true);
       const reason = interaction.options.getString("reason");
@@ -123,6 +124,43 @@ export class DiscordBot {
       return;
     }
 
+    /* ---------------- agent_merge ---------------- */
+    if (interaction.commandName === "agent_merge") {
+      await interaction.reply({ content: "Merging last agent branch…", ephemeral: true });
+
+      try {
+        const result = await this.agent.mergeLastAgentBranch();
+        await interaction.editReply(
+          `✅ Merged branch **${result.mergedBranch}** into **main**`
+        );
+      } catch (err: any) {
+        await interaction.editReply(
+          "❌ Merge failed:\n" + (err?.message ?? String(err))
+        );
+      }
+      return;
+    }
+
+    /* ---------------- agent_cleanup ---------------- */
+    if (interaction.commandName === "agent_cleanup") {
+      await interaction.reply({ content: "Cleaning up agent branches…", ephemeral: true });
+
+      try {
+        const result = await this.agent.cleanupAgentBranches();
+        await interaction.editReply(
+          result.deleted.length
+            ? `🧹 Deleted branches:\n${result.deleted.join("\n")}`
+            : "Nothing to clean up."
+        );
+      } catch (err: any) {
+        await interaction.editReply(
+          "❌ Cleanup failed:\n" + (err?.message ?? String(err))
+        );
+      }
+      return;
+    }
+
+    /* ---------------- agent_status ---------------- */
     if (interaction.commandName === "agent_status") {
       await interaction.reply({
         content: JSON.stringify(await this.agent.getStatus(), null, 2),
@@ -131,38 +169,13 @@ export class DiscordBot {
       return;
     }
 
+    /* ---------------- agent_tokens ---------------- */
     if (interaction.commandName === "agent_tokens") {
       await interaction.reply({
         content: JSON.stringify(await this.agent.getTokenStats(), null, 2),
         ephemeral: true,
       });
       return;
-    }
-
-    if (interaction.commandName === "agent_explain") {
-      const plan = this.agent.getLastPlan();
-      const planId = this.agent.getPendingPlanId() ?? "unknown";
-
-      if (!plan) {
-        await interaction.reply({
-          content: "No plan available.",
-          ephemeral: true,
-        });
-        return;
-      }
-
-      const file = makeArtifactFileName("plan", planId, "json");
-
-      await interaction.reply({
-        content: clipText(
-          ["Plan preview:", clipText(JSON.stringify(plan, null, 2), 1200)].join(
-            "\n"
-          ),
-          SAFE_MAX_CONTENT
-        ),
-        files: [jsonAttachment(file, plan)],
-        ephemeral: true,
-      });
     }
   }
 
@@ -190,10 +203,7 @@ export class DiscordBot {
 
         const diffPreview =
           result.diffFull && result.diffFull.trim()
-            ? toCodeBlock(
-                clipText(result.diffFull, 900),
-                "diff"
-              )
+            ? toCodeBlock(clipText(result.diffFull, 900), "diff")
             : "_No diff preview available._";
 
         const content = clipText(
@@ -208,9 +218,6 @@ export class DiscordBot {
             "",
             "Diff preview:",
             diffPreview,
-            "",
-            "Push when ready:",
-            `git push -u origin ${result.branch}`,
           ].join("\n"),
           SAFE_MAX_CONTENT
         );
@@ -220,24 +227,17 @@ export class DiscordBot {
           textAttachment(diffFile, result.diffFull),
         ].filter(Boolean) as AttachmentBuilder[];
 
-        await interaction.editReply({
-          content,
-          files: attachments,
-        });
+        await interaction.editReply({ content, files: attachments });
       } catch (err: any) {
         await interaction.editReply(
           "❌ Execution failed:\n" + (err?.message ?? String(err))
         );
       }
-      return;
     }
 
     if (interaction.customId === "agent_reject") {
       this.agent.clearPendingPlan();
-      await interaction.reply({
-        content: "Proposal rejected.",
-        ephemeral: true,
-      });
+      await interaction.reply({ content: "Proposal rejected.", ephemeral: true });
     }
   }
 
